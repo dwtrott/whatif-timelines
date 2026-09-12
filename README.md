@@ -30,7 +30,11 @@ in **Google Colab** on `localhost`, with **any OpenAI-compatible model** — an 
    lane — from the topic and event articles plus Wikipedia **year articles** ("2003 in the United States"), in ≤2-year
    windows, all domains — so the causal map has the whole world to classify, not just the topic. If the horizon is in
    the future, a *Baseline forecast* lane starts automatically from today.
-5. **Fork.** Click any event → *What if…* → new lane. Before the first round the engine builds a **causal map**: every
+5. **Fork.** Click any event → *What if…* → new lane. First the engine **decomposes the premise** into stipulations
+   (the intervention, forced true) and claimed consequences ("…and Gore becomes president"), assigns each consequence a
+   probability with a cited basis and *rolls* it — so a premise whose assumed outcome doesn't follow produces the
+   branch that actually follows (a "Premise check" panel shows the roll; a switch lets you stipulate the whole premise
+   instead). Then it builds a **causal map**: every
    real event after the fork on the parent lane is classified *independent* (still happens unless a named actor
    intercepts it), *dependent* (falls away with the premise) or *contingent* (probability p), plus a **structural
    calendar** — elections, term limits, scheduled events, actor lifecycles — knowable at the cutoff. Then every period
@@ -63,6 +67,11 @@ in **Google Colab** on `localhost`, with **any OpenAI-compatible model** — an 
    scenario or on a single fork are injected into every agent and arbiter prompt as expert priors. Set a **strong
    model** (e.g. `gpt-4.1`) for the judgement roles — casting, arbiter, reports, history extraction — while agents run
    on a cheap one.
+
+**The canvas.** Wheel to zoom at the cursor, drag to pan, minimap with a draggable viewport, `+ − 0` keys. Dense
+stretches collapse into count bubbles that open on click; headlines appear as labels when there's room; diamonds are
+dice, grey squares are real exogenous events, small dots colour-code the category, rings show divergence. **Story
+view** renders any lane as a vertical narrative feed with premise checks, dice, actors and inherited history.
 
 ## Run in Colab
 

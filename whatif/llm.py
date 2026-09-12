@@ -438,6 +438,10 @@ def mock_response(kind: str, messages: list[dict], ctx: dict) -> str:
         return _json.dumps({"outcome_questions": ["Did the crisis escalate?"], "per_run": [{"run": f"run {i+1}", "answers": {"Did the crisis escalate?": "yes" if i % 2 == 0 else "no"}, "one_line": "mock"} for i in range(n)],
                             "frequencies": {"Did the crisis escalate?": {"yes": (n + 1) // 2, "no": n // 2, "partial": 0}},
                             "summary": "Mock aggregate summary.", "decisive_junctures": ["the election roll"]})
+    if kind == "premise":
+        return _json.dumps({"stipulations": [ctx.get("premise", "")[:80]], "consequences": [{"claim": "the assumed outcome follows", "p": 0.4,
+                            "basis": "mock basis", "date": "", "if_yes": "The assumed outcome occurs.", "if_no": "The assumed outcome does not occur; the incumbent side prevails.", "importance": 5}],
+                            "immediate_state": "mock immediate state", "note_to_user": "Your premise assumed an outcome that is uncertain."})
     if kind == "period_critic":
         return _json.dumps({"events": [], "junctures": [], "add_events": [], "notes": "mock: looks plausible"})
     if kind == "plan":

@@ -48,17 +48,26 @@
       </div>
       <div id="scMeta" class="meta"></div>
     </div>
+    <div id="viewBar">
+      <div class="seg"><button id="viewGraph" class="small">Graph</button><button id="viewStory" class="small">Story</button></div>
+      <span class="spacer"></span>
+      <button id="zoomOut" class="ghost small" title="zoom out (−)">−</button>
+      <button id="zoomFitBtn" class="ghost small" title="fit (0)">fit</button>
+      <button id="zoomIn" class="ghost small" title="zoom in (+)">+</button>
+    </div>
     <div id="timelineWrap">
       <div id="laneLabels"></div>
       <div id="timelineScroll">
         <svg id="timeline" xmlns="http://www.w3.org/2000/svg"></svg>
       </div>
+      <div id="storyView" hidden></div>
       <div id="emptyState" class="empty">
         <div class="big">⑂</div>
         <p>Create a scenario to build a baseline timeline from real retrieved sources, then click any event and ask <em>what if…</em> to fork an alternate timeline simulated by the agent swarm.</p>
         <button class="primary" onclick="openNewScenario()">+ New scenario</button>
       </div>
     </div>
+    <div id="minimap" hidden></div>
     <div id="legend" class="small muted">
       <span><i class="lg actual"></i>actual history</span>
       <span><i class="lg sim"></i>simulated</span>
@@ -67,7 +76,7 @@
       <span><i class="lg" style="background:#94a3b8;border-radius:2px"></i>exogenous real event</span>
       <span><i class="lg div"></i>ring = divergence from parent</span>
       <span>size = importance · opacity = confidence</span>
-      <span class="right">scroll = pan · ctrl+wheel = zoom</span>
+      <span class="right">wheel = zoom · drag = pan · click a bubble to open it · +/−/0 keys</span>
     </div>
     <div id="console">
       <div class="consoleHead"><span>Swarm activity</span><button class="ghost small" id="consoleToggle">hide</button></div>

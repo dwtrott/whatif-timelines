@@ -180,6 +180,7 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
                              step_days=int(body["step_days"]) if body.get("step_days") else None,
                              max_rounds=int(body["max_rounds"]) if body.get("max_rounds") else None,
                              notes=body.get("notes", ""), runs=int(body.get("runs") or 1),
+                             premise_mode=body.get("premise_mode", "intervention"),
                              seed=int(body["seed"]) if body.get("seed") not in (None, "") else None)
         except KeyError as e:
             raise HTTPException(404, str(e))

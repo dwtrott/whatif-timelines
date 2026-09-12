@@ -92,6 +92,9 @@ class Branch:
     horizon_end: str = ""                                  # per-branch horizon override (planner uses shorter ones)
     plan_id: str = ""                                      # intervention plan this branch belongs to
     critic_notes: list[dict] = field(default_factory=list) # per-period critic notes
+    premise_mode: str = "intervention"                     # intervention (roll claimed consequences) | stipulate (force whole premise)
+    premise_analysis: dict = field(default_factory=dict)   # stipulations, consequences (with rolls), immediate_state, note
+    effective_premise: str = ""                            # what is actually true on this branch after rolling consequences
 
     def events_until(self, iso: str) -> list[Event]:
         return [e for e in self.events if e.date <= iso]

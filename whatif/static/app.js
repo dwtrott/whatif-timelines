@@ -11,7 +11,7 @@ const daysBetween = (a, b) => Math.round((parseD(b) - parseD(a)) / DAY);
 
 const state = {
   config: null, scenarios: [], sc: null, sel: null, pxPerDay: null, laneOrder: [], hoverTimer: null,
-  sse: null, pollTimer: null, chat: {}, lastSeq: 0,
+  sse: null, pollTimer: null, chat: {}, lastSeq: 0, view: 'graph', storyLane: null, L: null,
 };
 
 // ------------------------------------------------------------------ api
@@ -139,6 +139,8 @@ function logLine(m) {
 function renderAll(soft = false) {
   const sc = state.sc;
   $('#emptyState').hidden = !!sc;
+  $('#viewGraph').classList.toggle('on', state.view !== 'story');
+  $('#viewStory').classList.toggle('on', state.view === 'story');
   renderHeader();
   renderSidebar();
   renderTimeline();
@@ -155,7 +157,6 @@ function renderHeader() {
     <span class="status ${sc.status}">${sc.status}</span>
     <span>${fmtD(sc.anchor_date)} → ${fmtD(sc.horizon_date)}</span>
     <span>${sc.personas.length} agents · ${nb} lane${nb === 1 ? '' : 's'}</span>
-    <button class="ghost small" onclick="zoomFit()">fit</button>
     <button class="ghost small danger" onclick="deleteScenario()">delete</button>`;
   if (sc.status === 'failed') $('#scMeta').insertAdjacentHTML('afterbegin', `<span class="errbox">${esc(sc.error)}</span>`);
 }
@@ -208,52 +209,88 @@ function renderSidebar() {
 }
 
 // ------------------------------------------------------------------ timeline
-const PADL = 30, PADR = 60, AXIS_H = 34, LH = 78;
+const PADL = 30, PADR = 80, AXIS_H = 36, LH_MIN = 64, LH_MAX = 120;
+const CAT_COLORS = {political: '#7c9cff', economic: '#f6c453', security: '#fb7185', media: '#c084fc', legal: '#4fd1c5', social: '#a3e635', technology: '#38bdf8', corporate: '#fbbf24', foreign: '#f472b6', juncture: '#ffffff', premise: '#ffffff'};
+
+function laneHeightFor(b, ppd) {
+  // denser lanes get taller rows so stacked events don't overlap
+  const per = {};
+  b.events.forEach(e => per[e.date] = (per[e.date] || 0) + 1);
+  const maxStack = Math.max(1, ...Object.values(per));
+  return Math.max(LH_MIN, Math.min(LH_MAX, 44 + maxStack * 14));
+}
+
+function layout(sc) {
+  const order = laneOrder(sc);
+  const scroll = $('#timelineScroll');
+  const totalDays = Math.max(1, daysBetween(sc.anchor_date, sc.horizon_date));
+  if (!state.pxPerDay) state.pxPerDay = Math.max(1.0, (Math.max(scroll.clientWidth, 600) - PADL - PADR) / totalDays);
+  const ppd = state.pxPerDay;
+  const X = iso => PADL + Math.max(0, Math.min(totalDays, daysBetween(sc.anchor_date, iso))) * ppd;
+  const W = PADL + totalDays * ppd + PADR;
+  const heights = order.map(b => laneHeightFor(b, ppd));
+  const tops = []; let y = AXIS_H;
+  heights.forEach(h => { tops.push(y); y += h; });
+  return {order, ppd, X, W, H: y + 20, heights, tops, totalDays};
+}
+
+function clusterEvents(evs, X, minGap) {
+  // greedy 1-D clustering by pixel distance; returns [{x, date, items[]}]
+  const sorted = evs.slice().sort((a, b) => a.date.localeCompare(b.date));
+  const out = [];
+  for (const e of sorted) {
+    const x = X(e.date);
+    const last = out[out.length - 1];
+    if (last && x - last.x1 < minGap) { last.items.push(e); last.x1 = x; }
+    else out.push({x0: x, x1: x, items: [e]});
+  }
+  out.forEach(c => { c.x = (c.x0 + c.x1) / 2; c.date = c.items[0].date; c.dateEnd = c.items[c.items.length - 1].date; });
+  return out;
+}
 
 function renderTimeline() {
   const svg = $('#timeline'), labels = $('#laneLabels');
   const sc = state.sc;
-  if (!sc) { svg.innerHTML = ''; labels.innerHTML = ''; return; }
-  const order = laneOrder(sc);
+  if (!sc) { svg.innerHTML = ''; labels.innerHTML = ''; renderMinimap(); return; }
+  if (state.view === 'story') { renderStory(); return; }
+  $('#timelineScroll').hidden = false; $('#storyView').hidden = true; $('#laneLabels').hidden = false;
+  const L = layout(sc);
+  state.L = L;
+  const {order, ppd, X, W, H, heights, tops} = L;
   state.laneOrder = order;
-  const scroll = $('#timelineScroll');
-  const totalDays = Math.max(1, daysBetween(sc.anchor_date, sc.horizon_date));
-  if (!state.pxPerDay) state.pxPerDay = Math.max(1.4, (Math.max(scroll.clientWidth, 600) - PADL - PADR) / totalDays);
-  const ppd = state.pxPerDay;
-  const X = iso => PADL + Math.max(0, Math.min(totalDays, daysBetween(sc.anchor_date, iso))) * ppd;
-  const W = PADL + totalDays * ppd + PADR;
-  const H = AXIS_H + order.length * LH + 20;
+  const laneY = {}; order.forEach((b, i) => laneY[b.id] = tops[i] + heights[i] / 2);
   svg.setAttribute('width', W); svg.setAttribute('height', H);
-  const laneY = {};
-  order.forEach((b, i) => laneY[b.id] = AXIS_H + i * LH + LH / 2);
-
-  let g = '';
-  // lane backgrounds
-  order.forEach((b, i) => { g += `<rect class="laneBg" x="0" y="${AXIS_H + i * LH}" width="${W}" height="${LH}" fill="${i % 2 ? 'rgba(255,255,255,.015)' : 'transparent'}"/>`; });
-  order.forEach((b, i) => { g += `<line class="laneSep" x1="0" x2="${W}" y1="${AXIS_H + (i + 1) * LH}" y2="${AXIS_H + (i + 1) * LH}"/>`; });
-  // axis
-  g += axisSVG(sc, X, W, H, ppd);
-  // today
-  const today = state.config?.today;
-  if (today && today > sc.anchor_date && today < sc.horizon_date) {
-    g += `<line class="todayLine" x1="${X(today)}" x2="${X(today)}" y1="${AXIS_H - 6}" y2="${H}"/><text class="todayText" x="${X(today) + 4}" y="${AXIS_H - 10}">today</text>`;
+  const scroll = $('#timelineScroll');
+  const view0 = scroll.scrollLeft - 200, view1 = scroll.scrollLeft + scroll.clientWidth + 200;  // cull off-screen
+  let g = `<defs><filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>`;
+  // year bands
+  const a = parseD(sc.anchor_date), bEnd = parseD(sc.horizon_date);
+  for (let yr = a.getUTCFullYear(); yr <= bEnd.getUTCFullYear(); yr++) {
+    const x0 = X(`${yr}-01-01` < sc.anchor_date ? sc.anchor_date : `${yr}-01-01`), x1 = X(`${yr + 1}-01-01` > sc.horizon_date ? sc.horizon_date : `${yr + 1}-01-01`);
+    if (yr % 2 === 0) g += `<rect x="${x0}" y="${AXIS_H}" width="${Math.max(0, x1 - x0)}" height="${H - AXIS_H}" fill="rgba(255,255,255,.018)"/>`;
   }
-  // lanes
-  order.forEach(b => {
-    const y = laneY[b.id];
-    const evs = b.events.slice().sort((a, c) => a.date.localeCompare(c.date));
+  order.forEach((b, i) => { g += `<line class="laneSep" x1="0" x2="${W}" y1="${tops[i] + heights[i]}" y2="${tops[i] + heights[i]}"/>`; });
+  g += axisSVG(sc, X, W, H, ppd);
+  const today = state.config?.today;
+  if (today && today > sc.anchor_date && today < sc.horizon_date) g += `<line class="todayLine" x1="${X(today)}" x2="${X(today)}" y1="${AXIS_H - 6}" y2="${H}"/><text class="todayText" x="${X(today) + 4}" y="${AXIS_H - 12}">today</text>`;
+
+  const selId = state.sel?.type === 'event' ? state.sel.id : null;
+  const laneSelected = state.sel?.type === 'branch' ? state.sel.id : null;
+  const minGap = 14;
+  order.forEach((b, i) => {
+    const y = laneY[b.id], h = heights[i];
     const start = b.fork_date || sc.anchor_date;
-    const last = evs.length ? evs[evs.length - 1].date : start;
-    const endX = b.status === 'completed' && b.kind === 'actual' ? X(last) : X(last);
+    const evs = b.events;
+    const last = evs.length ? evs.reduce((m, e) => e.date > m ? e.date : m, evs[0].date) : start;
+    const endX = X(last);
+    const dim = laneSelected && laneSelected !== b.id ? 0.45 : 1;
     if (b.parent_branch_id) {
       g += `<path class="inherit" d="M${X(sc.anchor_date)},${y} L${X(start)},${y}" stroke="${b.color}"/>`;
       const py = laneY[b.parent_branch_id];
-      if (py != null) {
-        const x = X(start);
-        g += `<path class="forkLink" d="M${x},${py} C${x},${(py + y) / 2} ${x},${(py + y) / 2} ${x},${y}" stroke="${b.color}"/>`;
-      }
+      if (py != null) { const x = X(start); g += `<path class="forkLink" d="M${x},${py} C${x},${py + (y - py) * .4} ${x},${py + (y - py) * .6} ${x},${y}" stroke="${b.color}" opacity="${dim}"/>`; }
     }
-    g += `<path class="laneLine" d="M${X(start)},${y} L${Math.max(endX, X(start) + 2)},${y}" stroke="${b.color}" stroke-opacity="${b.kind === 'actual' ? .5 : .85}"/>`;
+    if (laneSelected === b.id) g += `<rect x="0" y="${tops[i]}" width="${W}" height="${h}" fill="${b.color}" fill-opacity=".05"/>`;
+    g += `<path class="laneLine" d="M${X(start)},${y} L${Math.max(endX, X(start) + 2)},${y}" stroke="${b.color}" stroke-opacity="${(b.kind === 'actual' ? .45 : .85) * dim}"/>`;
     if (['running', 'retrieving', 'pending'].includes(b.status)) {
       const hx = Math.max(endX, X(start) + 2);
       g += `<circle class="head" cx="${hx}" cy="${y}" r="7" fill="${b.color}"/><text class="rlabel" x="${hx + 12}" y="${y + 4}">${b.status === 'running' ? `round ${b.rounds_done}/${b.total_rounds}` : b.status + '…'}</text>`;
@@ -262,65 +299,86 @@ function renderTimeline() {
     } else if (b.status === 'failed' || b.status === 'stopped') {
       g += `<text class="rlabel" x="${endX + 12}" y="${y + 4}" fill="var(--bad)">${b.status}</text>`;
     }
-    // events, stacked per date
-    const byDate = {};
-    evs.forEach(e => (byDate[e.date] ||= []).push(e));
-    Object.values(byDate).forEach(group => {
-      group.forEach((e, k) => {
-        const off = group.length === 1 ? 0 : (k - (group.length - 1) / 2) * 16;
+    const clusters = clusterEvents(evs, X, minGap);
+    clusters.forEach((c, ci) => {
+      if (c.x < view0 || c.x > view1) return;
+      const nextX = clusters[ci + 1] ? clusters[ci + 1].x : Infinity;
+      const room = nextX - c.x;
+      if (c.items.length > 3 && (c.x1 - c.x0) < minGap * 2) {
+        // cluster bubble
+        const maxImp = Math.max(...c.items.map(e => e.importance || 3));
+        const r = 8 + Math.min(10, Math.log2(c.items.length) * 3);
+        const hasJ = c.items.some(e => e.kind === 'juncture');
+        g += `<g class="ev cluster" data-cluster="${b.id}|${c.date}|${c.dateEnd}" transform="translate(${c.x},${y})" opacity="${dim}">
+          <circle r="${r + 3}" fill="${b.color}" fill-opacity=".12"/><circle r="${r}" fill="${b.color}" fill-opacity="${.55 + maxImp * .08}" stroke="${hasJ ? '#fff' : '#0b0f17'}" stroke-width="1.5"/>
+          <text y="4" text-anchor="middle" font-size="11" font-weight="600" fill="#0b0f17">${c.items.length}</text></g>`;
+        return;
+      }
+      // individual events, stacked vertically within the cluster
+      const n = c.items.length;
+      c.items.forEach((e, k) => {
+        const off = n === 1 ? 0 : (k - (n - 1) / 2) * Math.min(16, (h - 16) / n);
+        const ex = X(e.date);
         const r = 3.5 + (e.importance || 3) * 1.1;
-        const op = e.kind === 'actual' || e.kind === 'premise' ? 1 : 0.45 + (e.confidence ?? .6) * .55;
-        const sel = state.sel?.type === 'event' && state.sel.id === e.id ? 'selected' : '';
-        const fill = e.kind === 'actual' ? '#e5e7eb' : b.color;
+        const op = e.kind === 'actual' || e.kind === 'premise' ? 1 : 0.5 + (e.confidence ?? .6) * .5;
+        const fill = e.kind === 'actual' ? '#e5e7eb' : e.kind === 'exogenous' ? '#94a3b8' : b.color;
+        const sel = selId === e.id;
         const core = e.kind === 'juncture' ? `<rect class="core" x="${-r}" y="${-r}" width="${2 * r}" height="${2 * r}" transform="rotate(45)" fill="${fill}" fill-opacity="${op}"/>`
-          : e.kind === 'exogenous' ? `<rect class="core" x="${-r}" y="${-r}" width="${2 * r}" height="${2 * r}" rx="2" fill="#94a3b8" fill-opacity="${op}" stroke="${b.color}"/>`
+          : e.kind === 'exogenous' ? `<rect class="core" x="${-r}" y="${-r}" width="${2 * r}" height="${2 * r}" rx="2" fill="${fill}" fill-opacity="${op}" stroke="${b.color}"/>`
           : `<circle class="core" r="${r}" fill="${fill}" fill-opacity="${op}"/>`;
-        g += `<g class="ev ${e.kind} ${sel}" data-id="${e.id}" data-b="${b.id}" transform="translate(${X(e.date)},${y + off})">
+        const catDot = e.category && CAT_COLORS[e.category] && e.kind !== 'actual' ? `<circle cx="${r * .7}" cy="${-r * .7}" r="2.2" fill="${CAT_COLORS[e.category]}" stroke="#0b0f17" stroke-width=".6"/>` : '';
+        const showLabel = n === 1 && room > 70 && ((e.importance || 3) >= 4 || e.kind === 'premise' || e.kind === 'juncture' || room > 160) && ppd > 0.6;
+        const label = showLabel ? `<text class="evlabel" x="${r + 5}" y="${4}" ${e.kind === 'juncture' ? 'font-style="italic"' : ''} fill-opacity="${dim}">${esc(trunc(e.headline, Math.min(48, Math.max(12, Math.floor((room - 10) / 6.2)))))}</text>` : '';
+        g += `<g class="ev ${e.kind} ${sel ? 'selected' : ''}" data-id="${e.id}" data-b="${b.id}" transform="translate(${ex},${y + off})" opacity="${dim}" ${sel ? 'filter="url(#glow)"' : ''}>
           <circle class="halo" r="${r + 6}"/>
           ${e.divergence > 0.05 ? `<circle class="ring" r="${r + 3.5}" stroke-opacity="${e.divergence}" stroke-width="${1 + e.divergence * 2}"/>` : ''}
-          ${core}
-        </g>`;
+          ${core}${catDot}${label}</g>`;
       });
     });
   });
   svg.innerHTML = g;
 
-  // lane labels (left column)
-  labels.innerHTML = order.map((b, i) => `<div class="laneLabel ${state.sel?.type === 'branch' && state.sel.id === b.id ? 'active' : ''}" style="top:${AXIS_H + i * LH - scroll.scrollTop}px;height:${LH}px" onclick="selectBranch('${b.id}')">
-      <div class="nm"><i class="sw" style="background:${b.color};width:10px;height:10px;border-radius:3px;flex:none"></i><span title="${esc(b.name)}">${esc(b.name)}</span></div>
+  labels.innerHTML = order.map((b, i) => `<div class="laneLabel ${laneSelected === b.id ? 'active' : ''}" style="top:${tops[i] - scroll.scrollTop}px;height:${heights[i]}px;border-left:3px solid ${b.color}" onclick="selectBranch('${b.id}')">
+      <div class="nm"><span title="${esc(b.name)}">${esc(b.name)}</span></div>
       <div class="pr" title="${esc(b.premise)}">${b.premise ? 'what if: ' + esc(b.premise) : (b.kind === 'actual' ? 'actual · from sources' : 'baseline forecast')}</div>
       <div class="acts">
         ${b.status === 'running' || b.status === 'retrieving' ? `<button onclick="event.stopPropagation();stopBranch('${b.id}')">stop</button>` : ''}
-        ${b.status === 'completed' && b.report?.summary ? `<button onclick="event.stopPropagation();selectBranch('${b.id}')">report</button>` : ''}
         ${b.status !== 'running' && b.status !== 'retrieving' ? `<button onclick="event.stopPropagation();forkAtDate('${b.id}')">fork at…</button>` : ''}
+        <button onclick="event.stopPropagation();openStory('${b.id}')" title="read this lane as a story">story</button>
       </div>
     </div>`).join('');
 
-  // interactions
   $$('.ev', svg).forEach(el => {
+    if (el.dataset.cluster) {
+      el.addEventListener('click', () => openCluster(el.dataset.cluster));
+      el.addEventListener('mouseenter', ev => showClusterTip(ev, el.dataset.cluster));
+      el.addEventListener('mousemove', moveTip); el.addEventListener('mouseleave', hideTip);
+      return;
+    }
     el.addEventListener('click', () => selectEvent(el.dataset.id, el.dataset.b));
     el.addEventListener('mouseenter', ev => showTip(ev, el.dataset.id, el.dataset.b));
     el.addEventListener('mousemove', moveTip);
     el.addEventListener('mouseleave', hideTip);
   });
+  renderMinimap();
 }
 
+function trunc(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
 function axisSVG(sc, X, W, H, ppd) {
-  let g = `<g class="axis"><line x1="0" x2="${W}" y1="${AXIS_H}" y2="${AXIS_H}"/>`;
+  let g = `<g class="axis"><rect x="0" y="0" width="${W}" height="${AXIS_H}" fill="var(--bg2)"/><line x1="0" x2="${W}" y1="${AXIS_H}" y2="${AXIS_H}"/>`;
   const a = parseD(sc.anchor_date), b = parseD(sc.horizon_date);
   const spanDays = (b - a) / DAY;
-  // tick granularity
   let mode = 'month';
   if (ppd * 30 < 45) mode = spanDays > 900 ? 'year' : 'quarter';
   if (ppd * 7 > 60) mode = 'week';
   if (ppd > 25) mode = 'day';
-  const d = new Date(a);
-  d.setUTCHours(0, 0, 0, 0);
+  const d = new Date(a); d.setUTCHours(0, 0, 0, 0);
   if (mode === 'month' || mode === 'quarter') d.setUTCDate(1);
   if (mode === 'quarter') d.setUTCMonth(Math.floor(d.getUTCMonth() / 3) * 3, 1);
-  if (mode === 'year') { d.setUTCMonth(0, 1); }
+  if (mode === 'year') d.setUTCMonth(0, 1);
   let guard = 0;
-  while (d <= b && guard++ < 2000) {
+  while (d <= b && guard++ < 3000) {
     const iso = d.toISOString().slice(0, 10);
     if (d >= a) {
       const x = X(iso);
@@ -328,7 +386,7 @@ function axisSVG(sc, X, W, H, ppd) {
       const lab = mode === 'day' ? d.getUTCDate() : mode === 'week' ? d.toLocaleDateString(undefined, {month: 'short', day: 'numeric', timeZone: 'UTC'})
         : mode === 'month' ? (d.getUTCMonth() === 0 ? d.getUTCFullYear() : d.toLocaleDateString(undefined, {month: 'short', timeZone: 'UTC'}))
         : mode === 'quarter' ? (d.getUTCMonth() === 0 ? d.getUTCFullYear() : 'Q' + (Math.floor(d.getUTCMonth() / 3) + 1)) : d.getUTCFullYear();
-      g += `<line class="${major ? 'major' : ''}" x1="${x}" x2="${x}" y1="${AXIS_H - (major ? 10 : 5)}" y2="${H}"/><text x="${x + 3}" y="${AXIS_H - 14}">${lab}</text>`;
+      g += `<line class="${major ? 'major' : ''}" x1="${x}" x2="${x}" y1="${AXIS_H - (major ? 10 : 5)}" y2="${H}"/><text x="${x + 3}" y="${AXIS_H - 14}" ${major ? 'font-weight="600"' : ''}>${lab}</text>`;
     }
     if (mode === 'day') d.setUTCDate(d.getUTCDate() + 1);
     else if (mode === 'week') d.setUTCDate(d.getUTCDate() + 7);
@@ -339,7 +397,108 @@ function axisSVG(sc, X, W, H, ppd) {
   return g + '</g>';
 }
 
-function zoomFit() { state.pxPerDay = null; renderTimeline(); }
+// ---- zoom / pan
+function zoomFit() { state.pxPerDay = null; renderTimeline(); $('#timelineScroll').scrollLeft = 0; }
+function zoomBy(factor, clientX) {
+  const scroll = $('#timelineScroll'); if (!state.sc || !state.pxPerDay) return;
+  const rect = scroll.getBoundingClientRect();
+  const px = clientX != null ? clientX - rect.left : rect.width / 2;
+  const dayAt = (scroll.scrollLeft + px - PADL) / state.pxPerDay;
+  state.pxPerDay = Math.max(0.15, Math.min(120, state.pxPerDay * factor));
+  renderTimeline();
+  scroll.scrollLeft = dayAt * state.pxPerDay + PADL - px;
+  renderMinimap();
+}
+function zoomToRange(d0, d1) {
+  const scroll = $('#timelineScroll'); const days = Math.max(2, daysBetween(d0, d1));
+  state.pxPerDay = Math.max(0.15, Math.min(120, (scroll.clientWidth - PADL - PADR) * 0.8 / days));
+  renderTimeline();
+  scroll.scrollLeft = Math.max(0, daysBetween(state.sc.anchor_date, d0) * state.pxPerDay - scroll.clientWidth * 0.1);
+  renderMinimap();
+}
+function openCluster(key) {
+  const [bid, d0, d1] = key.split('|');
+  const b = state.sc.branches[bid];
+  const items = b.events.filter(e => e.date >= d0 && e.date <= d1).sort((x, y) => x.date.localeCompare(y.date));
+  if (state.pxPerDay < 100 && daysBetween(d0, d1) > 0) { zoomToRange(d0, d1); }
+  state.sel = {type: 'cluster', bid, d0, d1};
+  $('#detailBody').innerHTML = `<div class="dhead"><div class="kicker" style="color:${b.color}">● ${esc(b.name)}</div><h2>${items.length} events · ${fmtD(d0)}${d1 !== d0 ? ' – ' + fmtD(d1) : ''}</h2><div class="row"><button class="small" onclick="zoomToRange('${d0}','${d1}')">zoom here</button><button class="ghost small" onclick="openStory('${bid}','${d0}')">read as story</button></div></div>
+    <div class="dsec">${items.map(e => `<div class="small" style="margin:5px 0;cursor:pointer" onclick="selectEvent('${e.id}','${bid}')"><span class="mono muted">${e.date}</span> ${kindBadge(e)} ${esc(e.headline)}</div>`).join('')}</div>`;
+  renderSidebar();
+}
+function kindBadge(e) {
+  return e.kind === 'juncture' ? '<span class="tag" style="color:#fff">◆ dice</span>' : e.kind === 'exogenous' ? '<span class="tag">■ real</span>' : e.kind === 'actual' ? '<span class="tag">actual</span>' : e.kind === 'premise' ? '<span class="tag">premise</span>' : '';
+}
+
+// ---- minimap
+function renderMinimap() {
+  const mm = $('#minimap'); const sc = state.sc;
+  if (!sc || !state.L || state.view === 'story') { mm.innerHTML = ''; mm.hidden = !sc || state.view === 'story'; return; }
+  mm.hidden = false;
+  const scroll = $('#timelineScroll');
+  const w = mm.clientWidth || 800, h = 44;
+  const {order, W} = state.L;
+  const k = w / W;
+  let g = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+  const rowH = Math.max(2, Math.min(6, (h - 8) / Math.max(1, order.length)));
+  order.forEach((b, i) => {
+    const y = 4 + i * rowH + rowH / 2;
+    const start = state.L.X(b.fork_date || sc.anchor_date) * k;
+    const evs = b.events;
+    const last = evs.length ? evs.reduce((m, e) => e.date > m ? e.date : m, evs[0].date) : (b.fork_date || sc.anchor_date);
+    g += `<line x1="${start}" x2="${state.L.X(last) * k}" y1="${y}" y2="${y}" stroke="${b.color}" stroke-width="${Math.max(1, rowH - 2)}" stroke-opacity=".7"/>`;
+    evs.forEach(e => { if ((e.importance || 3) >= 4) g += `<circle cx="${state.L.X(e.date) * k}" cy="${y}" r="1.4" fill="#fff" fill-opacity=".8"/>`; });
+  });
+  const vx = scroll.scrollLeft * k, vw = Math.max(6, scroll.clientWidth * k);
+  g += `<rect id="mmView" x="${vx}" y="0" width="${vw}" height="${h}" fill="rgba(255,255,255,.08)" stroke="rgba(255,255,255,.6)" rx="3"/></svg>`;
+  mm.innerHTML = g;
+}
+function minimapSeek(clientX) {
+  const mm = $('#minimap'); const rect = mm.getBoundingClientRect(); const scroll = $('#timelineScroll');
+  const k = (mm.clientWidth || 800) / state.L.W;
+  scroll.scrollLeft = (clientX - rect.left) / k - scroll.clientWidth / 2;
+}
+
+// ---- story view
+function openStory(bid, focusDate) {
+  state.view = 'story'; state.storyLane = bid; state.storyFocus = focusDate || null;
+  state.sel = {type: 'branch', id: bid};
+  renderAll();
+}
+function closeStory() { state.view = 'graph'; renderAll(); }
+function renderStory() {
+  const sc = state.sc; const sv = $('#storyView'); const b = sc.branches[state.storyLane] || sc.branches[sc.baseline_branch_id];
+  if (!b) { closeStory(); return; }
+  $('#timelineScroll').hidden = true; $('#laneLabels').innerHTML = ''; $('#laneLabels').hidden = true; sv.hidden = false; $('#minimap').hidden = true;
+  // lineage: ancestors' events before the fork (dimmed) + own events
+  const chain = []; let cur = b; while (cur) { chain.unshift(cur); cur = cur.parent_branch_id ? sc.branches[cur.parent_branch_id] : null; }
+  const items = [];
+  chain.forEach((br, i) => { const limit = chain[i + 1] ? chain[i + 1].fork_date : null; br.events.forEach(e => { if (!limit || e.date <= limit) items.push({e, br, inherited: br.id !== b.id}); }); });
+  items.sort((x, y) => x.e.date.localeCompare(y.e.date) || (x.e.round - y.e.round));
+  const junc = Object.fromEntries((b.junctures || []).map(j => [j.headline, j]));
+  const pa = b.premise_analysis || {};
+  let lastYear = '';
+  sv.innerHTML = `<div class="storyHead" style="border-left:4px solid ${b.color}">
+      <div class="row"><button class="ghost small" onclick="closeStory()">← graph</button><span class="status ${b.status}">${b.status}</span><span class="spacer"></span><button class="small" onclick="selectBranch('${b.id}')">report</button></div>
+      <h2>${esc(b.name)}</h2><div class="muted">${b.premise ? 'What if: ' + esc(b.premise) : (b.kind === 'actual' ? 'Actual history' : 'Baseline forecast')}</div>
+      ${pa.consequences?.length ? `<div class="premiseCheck">${pa.consequences.map(c => `<div><b>Premise check:</b> claimed “${esc(c.claim)}” · p ${c.p} · ${c.outcome === 'stipulated' ? 'stipulated' : `rolled ${c.roll} → <b style="color:${c.outcome === 'yes' ? 'var(--ok)' : 'var(--warn)'}">${c.outcome.toUpperCase()}</b>`}<div class="small muted">${esc(c.basis)}</div></div>`).join('')}</div>` : ''}
+    </div>
+    <div class="storyFeed">${items.map(({e, br, inherited}) => {
+      const yr = e.date.slice(0, 4); const yearHead = yr !== lastYear ? `<div class="yearHead">${yr}</div>` : ''; lastYear = yr;
+      const j = e.kind === 'juncture' ? junc[e.headline] : null;
+      const cls = `card ${e.kind} ${inherited ? 'inherited' : ''}`;
+      const border = e.kind === 'actual' ? '#9ca3af' : e.kind === 'exogenous' ? '#94a3b8' : br.color;
+      return yearHead + `<div class="${cls}" id="ev-${e.id}" style="border-left-color:${border}" onclick="selectEvent('${e.id}','${br.id}')">
+        <div class="cardTop"><span class="mono muted">${fmtD(e.date)}</span>${kindBadge(e)}${e.category && e.kind !== 'juncture' ? `<span class="tag">${esc(e.category)}</span>` : ''}${inherited ? `<span class="tag">inherited · ${esc(br.name)}</span>` : ''}<span class="spacer"></span>${'★'.repeat(e.importance || 3)}</div>
+        <div class="cardTitle">${esc(e.headline)}</div>
+        <div class="cardBody">${esc(e.summary)}</div>
+        ${j ? `<div class="dice"><span class="die">${j.outcome === 'yes' ? '✓' : '✗'}</span> p(yes) ${j.p_yes} · rolled ${j.roll} → ${j.outcome.toUpperCase()}${j.base_rate_note ? `<div class="small muted">base rate: ${esc(j.base_rate_note)}</div>` : ''}</div>` : ''}
+        ${(e.actors || []).length ? `<div class="tags">${e.actors.map(a => `<span class="tag">${esc(a)}</span>`).join('')}</div>` : ''}
+        ${(e.agent_actions || []).length ? `<details class="small"><summary class="muted">${e.agent_actions.length} actors moved this period</summary>${e.agent_actions.map(a => `<div style="margin:3px 0"><b>${esc(a.name)}</b>: ${esc(a.action)}${a.statement ? ` <i>“${esc(a.statement)}”</i>` : ''}</div>`).join('')}</details>` : ''}
+      </div>`;
+    }).join('')}</div>`;
+  if (state.storyFocus) { const first = items.find(x => x.e.date >= state.storyFocus); if (first) setTimeout(() => document.getElementById('ev-' + first.e.id)?.scrollIntoView({block: 'center'}), 50); }
+}
 
 function findEvent(id, bid) {
   const b = state.sc.branches[bid];
@@ -350,14 +509,21 @@ function findEvent(id, bid) {
 function showTip(ev, id, bid) {
   const e = findEvent(id, bid); if (!e) return;
   const t = $('#tooltip');
-  t.innerHTML = `<span class="d">${fmtD(e.date)} · ${esc(state.sc.branches[bid].name)}</span><b>${esc(e.headline)}</b>${esc(e.summary).slice(0, 180)}${e.summary.length > 180 ? '…' : ''}`;
+  t.innerHTML = `<span class="d">${fmtD(e.date)} · ${esc(state.sc.branches[bid].name)} ${kindBadge(e)}</span><b>${esc(e.headline)}</b>${esc(e.summary).slice(0, 220)}${e.summary.length > 220 ? '…' : ''}`;
+  t.hidden = false; moveTip(ev);
+}
+function showClusterTip(ev, key) {
+  const [bid, d0, d1] = key.split('|'); const b = state.sc.branches[bid];
+  const items = b.events.filter(e => e.date >= d0 && e.date <= d1);
+  const t = $('#tooltip');
+  t.innerHTML = `<span class="d">${fmtD(d0)}${d1 !== d0 ? ' – ' + fmtD(d1) : ''} · ${esc(b.name)}</span><b>${items.length} events — click to zoom</b>${items.slice(0, 6).map(e => `<div>· ${esc(trunc(e.headline, 60))}</div>`).join('')}${items.length > 6 ? `<div class="d">+${items.length - 6} more</div>` : ''}`;
   t.hidden = false; moveTip(ev);
 }
 function moveTip(ev) { const t = $('#tooltip'); t.style.left = Math.min(window.innerWidth - 340, ev.clientX + 14) + 'px'; t.style.top = (ev.clientY + 14) + 'px'; }
 function hideTip() { $('#tooltip').hidden = true; }
 
 // ------------------------------------------------------------------ selection + detail
-function selectEvent(id, bid) { state.sel = {type: 'event', id, bid}; renderTimeline(); renderSidebar(); renderDetail(); }
+function selectEvent(id, bid) { state.sel = {type: 'event', id, bid}; if (state.view !== 'story') renderTimeline(); renderSidebar(); renderDetail(); }
 function selectBranch(id) { state.sel = {type: 'branch', id}; renderTimeline(); renderSidebar(); renderDetail(); }
 
 function renderDetail(soft = false) {
@@ -399,6 +565,7 @@ function renderEventDetail(box) {
       <div class="grid2">
         <label>Branch name (optional)<input id="forkName"></label>
         <label>Rounds <span id="forkRoundsHint" class="muted"></span><input id="forkRounds" type="number" min="1" max="60" value="${suggestRounds(sc, e.date)}" oninput="updateRoundsHint('${e.date}')"></label>
+        <label>Treat premise as<select id="forkMode"><option value="intervention">intervention — roll its claimed consequences</option><option value="stipulate">stipulation — force the whole premise true</option></select></label>
         <label>Independent runs (Monte Carlo)<select id="forkRuns"><option value="1">1 — single story</option><option value="3">3</option><option value="5">5</option><option value="8">8</option></select></label>
         <label>Seed (optional, for reproducibility)<input id="forkSeed" type="number" placeholder="random"></label>
       </div>
@@ -449,9 +616,10 @@ async function doFork(parentId, eventId, dateOverride) {
   const notes = $('#forkNotes')?.value.trim() || '';
   const runs = parseInt($('#forkRuns')?.value || '1', 10) || 1;
   const seed = $('#forkSeed')?.value || '';
+  const premise_mode = $('#forkMode')?.value || 'intervention';
   if (runs > 1 && !confirm(`Launch ${runs} independent runs? ≈${runs} × ${estimateCalls(state.sc, dateOverride || findEvent(eventId, parentId)?.date || state.sc.anchor_date, rounds).replace('≈', '')} LLM calls.`)) return;
   try {
-    const res = await api(`/api/scenarios/${state.sc.id}/fork`, 'POST', {parent_branch_id: parentId, fork_event_id: eventId, premise, name, max_rounds: rounds, fork_date: dateOverride, notes, runs, seed});
+    const res = await api(`/api/scenarios/${state.sc.id}/fork`, 'POST', {parent_branch_id: parentId, fork_event_id: eventId, premise, name, max_rounds: rounds, fork_date: dateOverride, notes, runs, seed, premise_mode});
     state.sc = res.scenario;
     selectBranch(res.branch_id);
     schedulePoll();
@@ -470,6 +638,7 @@ function forkAtDate(bid) {
       <label>What if…<textarea id="forkPremise" placeholder="Counterfactual premise that becomes true on that date (leave empty for a plain forecast)"></textarea></label>
       <label>Analyst notes for this branch (optional)<textarea id="forkNotes" rows="2"></textarea></label>
       <div class="grid2"><label>Branch name<input id="forkName"></label><label>Rounds <span id="forkRoundsHint" class="muted"></span><input id="forkRounds" type="number" min="1" max="60" value="${suggestRounds(state.sc, lastEv ? lastEv.date : minD)}"></label>
+        <label>Treat premise as<select id="forkMode"><option value="intervention">intervention — roll consequences</option><option value="stipulate">stipulation — force true</option></select></label>
         <label>Independent runs<select id="forkRuns"><option value="1">1</option><option value="3">3</option><option value="5">5</option><option value="8">8</option></select></label><label>Seed<input id="forkSeed" type="number" placeholder="random"></label></div>
       <div class="row end"><button class="primary" onclick="doFork('${b.id}', null, $('#forkDate').value)">⑂ Fork timeline</button></div>
     </div>`;
@@ -494,6 +663,10 @@ function renderBranchDetail(box) {
         ${r.probability_estimate != null ? `<b>probability</b><span>≈${Math.round(r.probability_estimate * 100)}% ${r.converges ? '· converges with parent' : ''}</span>` : ''}
       </div>
       ${b.error ? `<div class="errbox" style="margin-top:8px">${esc(b.error)}</div>` : ''}
+      ${(b.premise_analysis?.consequences || []).length || b.premise_analysis?.note_to_user ? `<div class="premiseCheck" style="margin-top:8px"><b>Premise check</b>${b.premise_analysis.note_to_user ? `<div class="small">${esc(b.premise_analysis.note_to_user)}</div>` : ''}
+        <div class="small muted">stipulated: ${esc((b.premise_analysis.stipulations || []).join('; '))}</div>
+        ${(b.premise_analysis.consequences || []).map(c => `<div class="small" style="margin-top:4px">claimed “${esc(c.claim)}” · p ${c.p} · ${c.outcome === 'stipulated' ? 'stipulated' : `rolled ${c.roll} → <b style="color:${c.outcome === 'yes' ? 'var(--ok)' : 'var(--warn)'}">${c.outcome.toUpperCase()}</b>`}<div class="muted">${esc(c.basis)}</div></div>`).join('')}
+        ${b.effective_premise ? `<div class="small" style="margin-top:4px"><b>In force on this lane:</b> ${esc(b.effective_premise)}</div>` : ''}</div>` : ''}
       <div class="row" style="margin-top:8px">
         ${['running', 'retrieving'].includes(b.status) ? `<button class="danger small" onclick="stopBranch('${b.id}')">stop</button>` : ''}
         ${b.id !== sc.baseline_branch_id && !['running', 'retrieving'].includes(b.status) ? `<button class="ghost small danger" onclick="deleteBranch('${b.id}')">delete lane</button>` : ''}
@@ -872,19 +1045,41 @@ function bindUI() {
   $('#consoleToggle').onclick = () => { const c = $('#console'); c.classList.toggle('collapsed'); $('#consoleToggle').textContent = c.classList.contains('collapsed') ? 'show' : 'hide'; };
   $$('.modal').forEach(m => m.addEventListener('click', e => { if (e.target === m) m.hidden = true; }));
   const scroll = $('#timelineScroll');
-  scroll.addEventListener('scroll', () => { $$('.laneLabel').forEach((el, i) => el.style.top = (AXIS_H + i * LH - scroll.scrollTop) + 'px'); });
+  scroll.addEventListener('scroll', () => {
+    if (!state.L) return;
+    $$('.laneLabel').forEach((el, i) => el.style.top = (state.L.tops[i] - scroll.scrollTop) + 'px');
+    renderMinimap();
+    clearTimeout(state.cullTimer); state.cullTimer = setTimeout(renderTimeline, 120);  // re-render for culling/labels
+  });
   scroll.addEventListener('wheel', e => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
     if (!state.sc) return;
-    const rect = scroll.getBoundingClientRect();
-    const mx = e.clientX - rect.left + scroll.scrollLeft;
-    const dayAt = (mx - PADL) / state.pxPerDay;
-    state.pxPerDay = Math.max(0.2, Math.min(80, state.pxPerDay * (e.deltaY < 0 ? 1.2 : 1 / 1.2)));
-    renderTimeline();
-    scroll.scrollLeft = dayAt * state.pxPerDay + PADL - (e.clientX - rect.left);
+    if (e.ctrlKey || e.metaKey || (!e.shiftKey && Math.abs(e.deltaY) > Math.abs(e.deltaX))) {
+      e.preventDefault();
+      zoomBy(e.deltaY < 0 ? 1.25 : 1 / 1.25, e.clientX);
+    }
   }, {passive: false});
-  window.addEventListener('resize', () => { if (state.sc && !state.pxPerDayUser) renderTimeline(); });
+  // drag to pan
+  let drag = null;
+  scroll.addEventListener('mousedown', e => { if (e.target.closest('.ev')) return; drag = {x: e.clientX, y: e.clientY, sl: scroll.scrollLeft, st: scroll.scrollTop}; scroll.classList.add('dragging'); });
+  window.addEventListener('mousemove', e => { if (!drag) return; scroll.scrollLeft = drag.sl - (e.clientX - drag.x); scroll.scrollTop = drag.st - (e.clientY - drag.y); });
+  window.addEventListener('mouseup', () => { drag = null; scroll.classList.remove('dragging'); });
+  $('#zoomIn').onclick = () => zoomBy(1.5);
+  $('#zoomOut').onclick = () => zoomBy(1 / 1.5);
+  $('#zoomFitBtn').onclick = zoomFit;
+  $('#viewGraph').onclick = closeStory;
+  $('#viewStory').onclick = () => openStory(state.sel?.type === 'branch' ? state.sel.id : (state.sel?.bid || state.sc?.baseline_branch_id));
+  const mm = $('#minimap');
+  let mmDrag = false;
+  mm.addEventListener('mousedown', e => { mmDrag = true; minimapSeek(e.clientX); });
+  window.addEventListener('mousemove', e => { if (mmDrag) minimapSeek(e.clientX); });
+  window.addEventListener('mouseup', () => mmDrag = false);
+  window.addEventListener('keydown', e => {
+    if (e.target.matches('input, textarea, select')) return;
+    if (e.key === '+' || e.key === '=') zoomBy(1.5); else if (e.key === '-') zoomBy(1 / 1.5);
+    else if (e.key === '0') zoomFit(); else if (e.key === 'ArrowLeft') scroll.scrollLeft -= 200; else if (e.key === 'ArrowRight') scroll.scrollLeft += 200;
+    else if (e.key === 'Escape' && state.view === 'story') closeStory();
+  });
+  window.addEventListener('resize', () => { if (state.sc) renderTimeline(); });
   if (!state.scenarios.length) setTimeout(() => { if (!localStorage.getItem('whatif.seenHelp')) { openModal('helpModal'); localStorage.setItem('whatif.seenHelp', '1'); } }, 400);
 }
 

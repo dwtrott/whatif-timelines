@@ -454,7 +454,7 @@ class Engine:
     def fork(self, sid: str, parent_id: str, fork_event_id: str | None, premise: str, name: str = "",
              fork_date: str | None = None, step_days: int | None = None, max_rounds: int | None = None,
              notes: str = "", runs: int = 1, seed: int | None = None, horizon: str | None = None,
-             plan_id: str = "", color: str | None = None) -> Branch:
+             plan_id: str = "", color: str | None = None, premise_mode: str = "intervention") -> Branch:
         sc = self.store.get(sid)
         if not sc:
             raise KeyError("scenario not found")
@@ -488,7 +488,8 @@ class Engine:
                         knowledge_cutoff=fdate, notes=(notes or "").strip(), color=BRANCH_COLORS[idx], status="pending",
                         total_rounds=rounds, step_days=step, created_at=datetime.utcnow().isoformat(timespec="seconds"),
                         depth=parent.depth + 1, seed=(seed if seed is not None else random.randrange(1, 10**9)) + i,
-                        run_group=group, horizon_end=horizon if horizon != sc.horizon_date else "", plan_id=plan_id)
+                        run_group=group, horizon_end=horizon if horizon != sc.horizon_date else "", plan_id=plan_id,
+                        premise_mode=premise_mode if premise_mode in ("intervention", "stipulate") else "intervention")
             if color:
                 br.color = color
             br.events.append(Event(id=new_id("ev"), branch_id=br.id, date=fdate,
@@ -541,7 +542,7 @@ class Engine:
         future = [e for e in future if e.date <= hz]
         out = await self.llm.json(P.fill(P.CAUSAL_MAP_SYS, fork_date=br.fork_date, horizon=hz),
                                   P.fill(P.CAUSAL_MAP_USER, title=sc.title, fork_date=br.fork_date, horizon=hz,
-                                         premise=br.premise or "(no counterfactual change — plain forecast)",
+                                         premise=br.effective_premise or br.premise or "(no counterfactual change — plain forecast)",
                                          cast=", ".join(cast), events=ev_txt),
                                   kind="causal_map", ctx={"seed": br.id, "dates": [e.date for e in future[:8]],
                                                           "ids": [e.id for e in future[:8]]},
@@ -576,6 +577,54 @@ class Engine:
         self._log(sc, f"[{br.name}] Causal map: {n['independent']} independent, {n['contingent']} contingent, "
                       f"{n['dependent']} dependent real events; {len(br.structural)} structural events.", branch_id=br.id)
 
+    async def _analyze_premise(self, sc: Scenario, br: Branch, parent: Branch | None, rng: random.Random):
+        """Split the premise into stipulations (forced) and claimed consequences (rolled), set the effective premise."""
+        after = [e for e in (self.lineage_events(sc, parent) if parent else []) if br.fork_date < e.date][:12]
+        out = await self.llm.json(P.fill(P.PREMISE_SYS, fork_date=br.fork_date), P.fill(
+            P.PREMISE_USER, title=sc.title, fork_date=br.fork_date, premise=br.premise, briefing=br.briefing[:5000],
+            actual=P.format_timeline(after, 12)), kind="premise", ctx={"seed": br.id, "premise": br.premise},
+            strong=True, max_tokens=1800, temperature=0.2)
+        stip = [str(x) for x in (out.get("stipulations") or []) if isinstance(x, str)][:6] or [br.premise]
+        cons = []
+        resolved_facts = []
+        for c in (out.get("consequences") or [])[:4]:
+            if not isinstance(c, dict) or not c.get("claim"):
+                continue
+            p_yes = _float(c.get("p"), 0.5)
+            rec = {"claim": str(c["claim"])[:240], "p": round(p_yes, 2), "basis": str(c.get("basis", ""))[:500],
+                   "date": _safe_date(c.get("date"), br.fork_date, self._horizon(sc, br)) or br.fork_date,
+                   "if_yes": str(c.get("if_yes", ""))[:300], "if_no": str(c.get("if_no", ""))[:300],
+                   "importance": _int(c.get("importance"), 4)}
+            if br.premise_mode == "stipulate":
+                rec["outcome"] = "stipulated"
+                resolved_facts.append(rec["if_yes"] or rec["claim"])
+            else:
+                roll = rng.random()
+                yes = roll < p_yes
+                rec["roll"] = round(roll, 3)
+                rec["outcome"] = "yes" if yes else "no"
+                resolved_facts.append(rec["if_yes"] if yes else rec["if_no"])
+                br.junctures.append({"date": rec["date"], "question": f"Does the premise's assumed consequence follow: {rec['claim']}?",
+                                     "p_yes": rec["p"], "roll": rec["roll"], "outcome": rec["outcome"],
+                                     "headline": (rec["if_yes"] if yes else rec["if_no"])[:140], "round": -1,
+                                     "hazard_id": "", "base_rate_note": rec["basis"][:200]})
+                br.events.append(Event(id=new_id("ev"), branch_id=br.id, date=rec["date"],
+                                       headline=(rec["if_yes"] if yes else rec["if_no"])[:140],
+                                       summary=f"[Premise check — claimed: {rec['claim']} · p={rec['p']} · rolled {rec['roll']} → {rec['outcome'].upper()}] {rec['basis']}",
+                                       kind="juncture", category="premise", confidence=round(p_yes if yes else 1 - p_yes, 2),
+                                       divergence=0.5 if yes else 0.2, importance=rec["importance"], round=-1))
+                self._log(sc, f"[{br.name}] Premise check: '{rec['claim']}' p={rec['p']} rolled {rec['roll']} → {rec['outcome'].upper()}",
+                          "warning" if not yes else "info", branch_id=br.id)
+            cons.append(rec)
+        br.premise_analysis = {"stipulations": stip, "consequences": cons, "immediate_state": str(out.get("immediate_state", ""))[:600],
+                               "note_to_user": str(out.get("note_to_user", ""))[:300], "mode": br.premise_mode}
+        eff = "STIPULATED: " + "; ".join(stip)
+        if resolved_facts:
+            eff += ". CONSEQUENCES AS RESOLVED: " + "; ".join(f for f in resolved_facts if f)
+        br.effective_premise = eff[:1500]
+        if out.get("note_to_user") and br.premise_mode != "stipulate":
+            self._log(sc, f"[{br.name}] Premise note: {out['note_to_user']}", "warning", branch_id=br.id)
+
     def _horizon(self, sc: Scenario, br: Branch) -> str:
         return br.horizon_end or sc.horizon_date
 
@@ -605,6 +654,9 @@ class Engine:
                 docs = [Doc(**d) for d in sc.docs if d.get("source") in ("wikipedia_asof", "user", "gdelt")]
             self._log(sc, f"[{br.name}] Grounding briefing (cutoff {br.knowledge_cutoff})…", branch_id=br.id)
             br.briefing, br.briefing_flags = await self._ground(sc, docs, br.knowledge_cutoff, br.premise)
+            if br.premise:
+                self._log(sc, f"[{br.name}] Decomposing the premise into stipulations and claimed consequences…", branch_id=br.id)
+                await self._analyze_premise(sc, br, parent, rng)
             self._log(sc, f"[{br.name}] Mapping causal dependence of later real events + structural calendar…", branch_id=br.id)
             await self._world_setup(sc, br, parent)
             br.status = "running"
@@ -644,7 +696,7 @@ class Engine:
                                            background=p.background or "(not documented)", playbook=p.playbook or "(not documented)",
                                            relationships=p.relationships or "(not documented)", red_lines=p.red_lines or "(not documented)",
                                            state_block=_state_block(br, p)),
-                        P.fill(P.AGENT_USER, premise_block=P.premise_block(br.premise, br.fork_date),
+                        P.fill(P.AGENT_USER, premise_block=P.premise_block(br.effective_premise or br.premise, br.fork_date),
                                             notes_block=P.notes_block(sc.notes, br.notes) + _dossier_block(p),
                                             cutoff=br.knowledge_cutoff, briefing=br.briefing[:self.s.brief_chars],
                                             timeline=timeline_txt, memory=br.agent_memory.get(p.name, "(none)"),
@@ -695,7 +747,7 @@ class Engine:
                                         + (f" Says: {a['statement']}" if a["statement"] else "") for a in actions)
                 out = await self.llm.json(
                     P.fill(P.ARBITER_SYS, date=d, cutoff=br.knowledge_cutoff),
-                    P.fill(P.ARBITER_USER, premise_block=P.premise_block(br.premise, br.fork_date),
+                    P.fill(P.ARBITER_USER, premise_block=P.premise_block(br.effective_premise or br.premise, br.fork_date),
                                           notes_block=P.notes_block(sc.notes, br.notes), cutoff=br.knowledge_cutoff,
                                           briefing_short=br.briefing[:self.s.brief_chars // 2], timeline=timeline_txt,
                                           elapsed=elapsed, exogenous_block=exogenous_block, parent_block=parent_block,
@@ -879,7 +931,7 @@ class Engine:
                                                                     for j in (draft.get("junctures") or []) if isinstance(j, dict)],
                 "new_actors": draft.get("new_actors", []), "exits": draft.get("exits", [])}
         crit = await self.llm.json(P.fill(P.PERIOD_CRITIC_SYS, cutoff=br.knowledge_cutoff, prev=prev, date=d),
-                                   P.fill(P.PERIOD_CRITIC_USER, premise_block=P.premise_block(br.premise, br.fork_date),
+                                   P.fill(P.PERIOD_CRITIC_USER, premise_block=P.premise_block(br.effective_premise or br.premise, br.fork_date),
                                           briefing_short=br.briefing[:2500], timeline=timeline_txt[-6000:], exogenous=exogenous_block or "(none)",
                                           juncture_history=_juncture_history(br), cast=", ".join(p.name for p in personas),
                                           actions=actions_txt, draft=_json.dumps(slim, ensure_ascii=False)[:9000]),
@@ -1075,13 +1127,19 @@ class Engine:
         if br.causal_map:
             world_lines.append("CAUSAL MAP OF REAL POST-FORK EVENTS (analyst-level; the actors never saw this):")
             world_lines += [f"- {c['date']} {c['headline']}: {c['verdict'].upper()} p={c['p']:.2f} — {c['rationale']}" for c in br.causal_map[:25]]
+        if br.premise_analysis:
+            pa = br.premise_analysis
+            world_lines.append("PREMISE DECOMPOSITION: stipulated = " + "; ".join(pa.get("stipulations", [])))
+            for c in pa.get("consequences", []):
+                world_lines.append(f"  claimed consequence '{c['claim']}' p={c['p']} → {c.get('outcome', '?').upper()} ({c.get('basis', '')[:160]})")
+            world_lines.append("If a claimed consequence rolled NO, say so plainly at the top of the summary: the user's assumed outcome did not follow.")
         if br.junctures:
             world_lines.append("JUNCTURES ROLLED IN THIS RUN:")
             world_lines += [f"- {j['date']} {j['question']} — p(yes)={j['p_yes']}, rolled {j['roll']} → {j['outcome'].upper()}: {j['headline']}" for j in br.junctures]
         if br.extra_personas or br.retired:
             world_lines.append("CAST CHANGES: entered " + (", ".join(p.name for p in br.extra_personas) or "none") + "; exited " + (", ".join(br.retired) or "none"))
         out = await self.llm.json(P.REPORT_SYS, P.fill(P.REPORT_USER,
-            title=sc.title, question=sc.question, name=br.name, premise_block=P.premise_block(br.premise, br.fork_date),
+            title=sc.title, question=sc.question, name=br.name, premise_block=P.premise_block(br.effective_premise or br.premise, br.fork_date),
             fork_date=br.fork_date, horizon=self._horizon(sc, br), parent_block=parent_block, world_block="\n".join(world_lines),
             timeline=P.format_timeline([e for e in br.events]), world_state=br.world_state),
             kind="report", ctx={"premise": br.premise, "topic": sc.title, "seed": br.id}, max_tokens=2400, temperature=0.4, strong=True)
@@ -1100,7 +1158,7 @@ class Engine:
         d = br.events[-1].date if br.events else br.fork_date
         out = await self.llm.json(
             P.fill(P.INTERVIEW_SYS, name=p.name, role=p.role, date=d, goals=p.goals, stance=p.stance, style=p.style),
-            P.fill(P.INTERVIEW_USER, premise_block=P.premise_block(br.premise, br.fork_date) + _dossier_block(p), briefing_short=br.briefing[:5000],
+            P.fill(P.INTERVIEW_USER, premise_block=P.premise_block(br.effective_premise or br.premise, br.fork_date) + _dossier_block(p), briefing_short=br.briefing[:5000],
                                     timeline=P.format_timeline(self.lineage_events(sc, br)),
                                     memory=br.agent_memory.get(p.name, "(none)"), question=question),
             kind="interview", ctx={"name": p.name, "date": d, "premise": br.premise}, max_tokens=600)

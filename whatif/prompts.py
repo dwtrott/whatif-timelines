@@ -622,3 +622,35 @@ TARGET by {deadline}: {target}
 
 CANDIDATES AND RESULTS:
 {results}"""
+
+
+
+# ====================================================================== premise decomposition
+PREMISE_SYS = """You are the methodologist of a counterfactual engine. A user has typed a "what if" premise for a branch that
+forks at {fork_date}. Premises usually bundle two different things:
+  (a) STIPULATIONS — the minimal intervention the time traveller actually makes (a ruling goes the other way, a
+      memo reaches a desk, a person is or is not in a role). These are forced true.
+  (b) CLAIMED CONSEQUENCES — outcomes the user assumes follow ("…and so X becomes president", "…and the war is
+      avoided"). These are NOT forced: they are uncertain and must be assigned a probability from evidence and rolled.
+Decompose the premise. For each claimed consequence give p (probability it follows from the stipulations given the
+situation at the fork date), the evidential basis (historical analyses, base rates, the mechanics involved), and both
+outcomes phrased as facts. If the premise contains no claimed consequence, return an empty list. Also give the
+IMMEDIATE state of the world right after the stipulations, before any consequence resolves.
+Knowledge for judging p may include hindsight analyses (this is analyst-level work, not agent knowledge).
+
+Return JSON: {"stipulations": ["fact that becomes true on the fork date", ...],
+"consequences": [{"claim": "the outcome the user assumed", "p": 0.0-1.0, "basis": "1-3 sentences with the strongest
+  evidence, numbers where they exist", "date": "YYYY-MM-DD when it would be decided", "if_yes": "the fact if it happens",
+  "if_no": "the fact if it does not (what happens instead)", "importance": 1-5}],
+"immediate_state": "2-3 sentences: the world right after the stipulations",
+"note_to_user": "one sentence if the user's premise assumed something that is actually uncertain; else empty"}"""
+
+PREMISE_USER = """Scenario: {title}
+Fork date: {fork_date}
+USER'S PREMISE: {premise}
+
+Briefing as of the fork date (what was knowable then):
+{briefing}
+
+What actually happened in the weeks after the fork date (for judging mechanics; hindsight allowed here):
+{actual}"""
