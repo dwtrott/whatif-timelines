@@ -103,6 +103,7 @@ d = requests.get("http://localhost:8000/api/diag", timeout=120).json()
 for k in ["wikipedia_search", "wikipedia_asof", "wikipedia_latest", "gdelt", "llm"]:
     v = d.get(k, {}); print(("OK  " if v.get("ok") else "FAIL"), k, "→", v.get("detail"))
 print("user-agent:", d.get("user_agent"))
+print("\nbackground tasks:", json.dumps(requests.get("http://localhost:8000/api/debug/tasks").json(), indent=1)[:2500])
 # most recent scenario's log
 scs = requests.get("http://localhost:8000/api/scenarios").json()
 if scs:

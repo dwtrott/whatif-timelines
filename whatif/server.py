@@ -106,6 +106,24 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
         out["ok"] = out["ok"] and out["llm"]["ok"]
         return out
 
+    @app.get("/api/debug/tasks")
+    async def debug_tasks():
+        """Where are the background tasks parked right now? (for diagnosing hangs)"""
+        import traceback as _tb
+        now = time.time()
+        calls = [{"kind": v["kind"], "stage": v["stage"], "attempt": v["attempt"], "elapsed_s": round(now - v["started"], 1)}
+                 for v in engine.llm.inflight.values()]
+        tasks = []
+        for t in asyncio.all_tasks():
+            name = t.get_name()
+            if not (name.startswith("prepare:") or name.startswith("branch:")):
+                continue
+            frames = t.get_stack(limit=6)
+            tasks.append({"name": name, "done": t.done(),
+                          "stack": [f"{f.f_code.co_filename.split('/')[-1]}:{f.f_lineno} {f.f_code.co_name}" for f in frames]})
+        return {"inflight_llm_calls": calls, "tasks": tasks, "llm": engine.s.public(),
+                "python": __import__("sys").version.split()[0]}
+
     @app.get("/api/examples")
     async def examples():
         return EXAMPLES

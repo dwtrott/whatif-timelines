@@ -47,6 +47,10 @@ class Doc:
         return asdict(self)
 
 
+_GDELT_LOCK: asyncio.Lock | None = None
+_GDELT_LAST = 0.0
+
+
 class Retriever:
     def __init__(self, settings: Settings):
         self.s = settings
@@ -193,8 +197,17 @@ class Retriever:
         params = {"query": q, "mode": "artlist", "format": "json", "sort": "hybridrel",
                   "maxrecords": max_records or self.s.gdelt_max_records,
                   "startdatetime": start.strftime("%Y%m%d000000"), "enddatetime": end.strftime("%Y%m%d235959")}
+        global _GDELT_LOCK, _GDELT_LAST
+        if _GDELT_LOCK is None:
+            _GDELT_LOCK = asyncio.Lock()
         try:
-            r = await c.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params)
+            async with _GDELT_LOCK:  # GDELT allows one request per 5 seconds per IP
+                import time as _t
+                gap = 5.2 - (_t.monotonic() - _GDELT_LAST)
+                if gap > 0:
+                    await asyncio.sleep(gap)
+                _GDELT_LAST = _t.monotonic()
+                r = await c.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params)
             if r.status_code != 200 or not r.text.strip().startswith("{"):
                 self._err(f"GDELT '{query}'", f"HTTP {r.status_code} — {r.text[:160].strip()}")
                 return []
@@ -219,7 +232,7 @@ class Retriever:
             self.errors.append("Wikipedia: no article titles to fetch (title suggestion step returned none)")
         wiki_task = self.wiki_docs(titles, cutoff, want_latest=want_latest)
         queries = [topic] + [q for q in (extra_queries or []) if q and q != topic]
-        gdelt_tasks = [self.gdelt(q, cutoff - timedelta(days=120), cutoff) for q in queries[:3]]
+        gdelt_tasks = [self.gdelt(q, cutoff - timedelta(days=120), cutoff) for q in queries[:2]]
         results = await asyncio.gather(wiki_task, *gdelt_tasks, return_exceptions=True)
         for res in results:
             if isinstance(res, Exception):

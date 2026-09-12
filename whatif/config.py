@@ -191,7 +191,7 @@ def load_settings(**overrides) -> Settings:
         brief_chars=brief_chars,
         provider=provider, api_key=api_key, base_url=base_url.rstrip("/") + "/" if base_url and provider != "mock" else base_url,
         model=model, concurrency=concurrency, rpm=rpm,
-        timeout=float(_env("LLM_TIMEOUT_SECONDS") or 120),
+        timeout=float(_env("LLM_TIMEOUT_SECONDS") or 90),
         data_dir=_env("WHATIF_DATA_DIR") or "data",
     )
     if _env("WHATIF_USER_AGENT"):

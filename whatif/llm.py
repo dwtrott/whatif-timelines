@@ -63,6 +63,7 @@ class LLM:
         self.limiter = RateLimiter(settings.rpm)
         self.on_call = on_call
         self.calls = 0
+        self.inflight: dict[int, dict] = {}
         self.tokens_in = 0
         self.tokens_out = 0
         self._client: httpx.AsyncClient | None = None
@@ -134,13 +135,37 @@ class LLM:
 
         delay = 2.0
         last_err: Exception | None = None
+        key = id(payload)
+        self.inflight[key] = {"kind": kind, "started": time.time(), "stage": "queued (semaphore)", "attempt": 0}
+        try:
+            return await self._chat_loop(payload, kind, delay, last_err, key)
+        finally:
+            self.inflight.pop(key, None)
+
+    async def _chat_loop(self, payload, kind, delay, last_err, key):
         for attempt in range(6):
+            self.inflight[key]["attempt"] = attempt + 1
             async with self.sem:
+                self.inflight[key]["stage"] = "rate limiter"
                 await self.limiter.wait()
+                self.inflight[key]["stage"] = "http post"
                 t0 = time.monotonic()
                 try:
                     c = await self.client()
-                    r = await c.post(self.s.base_url + "chat/completions", headers=self._headers(), json=payload)
+                    post = asyncio.ensure_future(c.post(self.s.base_url + "chat/completions", headers=self._headers(), json=payload))
+                    waited = 0
+                    while True:  # watchdog: announce slow calls instead of silently waiting
+                        try:
+                            r = await asyncio.wait_for(asyncio.shield(post), 20)
+                            break
+                        except asyncio.TimeoutError:
+                            waited += 20
+                            if self.on_note:
+                                self.on_note(f"LLM call '{kind or 'chat'}' still waiting on {self.s.base_url} after {waited}s "
+                                             f"(attempt {attempt + 1})")
+                            if waited >= self.s.timeout:
+                                post.cancel()
+                                raise httpx.ReadTimeout(f"no response after {waited}s")
                 except (httpx.TimeoutException, httpx.TransportError) as e:
                     last_err = e
                     log.warning("LLM transport error (%s), retry %d", e, attempt + 1)
@@ -151,6 +176,7 @@ class LLM:
                     continue
                 ms = int((time.monotonic() - t0) * 1000)
 
+            self.inflight[key]["stage"] = f"got HTTP {r.status_code}"
             if r.status_code == 429 or r.status_code >= 500:
                 last_err = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
                 retry_after = r.headers.get("retry-after")

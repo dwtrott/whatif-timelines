@@ -84,7 +84,7 @@ class Engine:
             provider=self.s.public(),
         )
         self.store.save(sc)
-        self.tasks[sc.id] = asyncio.create_task(self._prepare(sc.id))
+        self.tasks[sc.id] = asyncio.create_task(self._prepare(sc.id), name=f"prepare:{sc.id}")
         return sc
 
     async def _prepare(self, sid: str):
@@ -297,7 +297,7 @@ class Engine:
                                kind="premise", importance=5, round=-1))
         sc.branches[br.id] = br
         self.store.save(sc)
-        self.tasks[br.id] = asyncio.create_task(self._run_branch(sc.id, br.id))
+        self.tasks[br.id] = asyncio.create_task(self._run_branch(sc.id, br.id), name=f"branch:{br.id}")
         return br
 
     def stop(self, branch_id: str) -> bool:
