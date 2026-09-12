@@ -24,7 +24,9 @@
       <div id="branchList" class="list"></div>
     </section>
     <section class="panel">
-      <h3>Agents <span id="agentCount" class="badge"></span></h3>
+      <h3>Agents <span id="agentCount" class="badge"></span><span class="spacer"></span>
+        <button class="ghost small" id="addAgentBtn" title="Add an actor by hand">+ add</button>
+        <button class="ghost small" id="recastBtn" title="Re-run casting with your guidance">recast…</button></h3>
       <div id="agentList" class="list"></div>
     </section>
     <section class="panel">
@@ -87,7 +89,8 @@
       <label>Agents in the swarm<input id="fAgents" type="number" min="2" max="12" value="6"></label>
     </div>
     <label>Wikipedia articles (optional, comma-separated; otherwise the model picks them)<input id="fTitles" placeholder="Lehman Brothers, Henry Paulson, TARP"></label>
-    <label>Seed documents (optional — pasted notes, articles, cables; treated as of the cutoff after leakage filtering)<textarea id="fDocs" rows="4" placeholder="Paste text…"></textarea></label>
+    <label>Analyst notes (optional — your priors about the actors; injected into casting and every agent/arbiter prompt)<textarea id="fNotes" rows="2" placeholder="e.g. Altman is a relentless coalition-builder who treats a 'no' as an opening position; the board is idealistic but has no operational plan."></textarea></label>
+    <label>Seed documents (optional — pasted notes, articles, cables; treated as of the cutoff after leakage filtering)<textarea id="fDocs" rows="3" placeholder="Paste text…"></textarea></label>
     <p class="small muted">Historical horizon → the baseline is extracted from present-day sources and you fork counterfactuals at any event. Future horizon → a baseline forecast is launched automatically from today, and you fork interventions off it.</p>
     <div class="row end">
       <button class="ghost" onclick="closeModal('newScenarioModal')">Cancel</button>
@@ -105,7 +108,8 @@
     <div id="pNotes" class="small muted"></div>
     <label>API key<input id="pKey" type="password" placeholder="leave blank to keep the current key"></label>
     <label>Base URL<input id="pBase"></label>
-    <label>Model <button class="ghost small" id="pListModels">list models</button><input id="pModel" list="modelList"><datalist id="modelList"></datalist></label>
+    <label>Model (agents) <button class="ghost small" id="pListModels">list models</button><input id="pModel" list="modelList"><datalist id="modelList"></datalist></label>
+    <label>Strong model (casting, arbiter, reports, history — optional; e.g. gpt-4.1, gpt-4o, o4-mini)<input id="pStrong" list="modelList" placeholder="blank = same as agents"></label>
     <div class="grid2">
       <label>Concurrency<input id="pConc" type="number" min="1" max="32"></label>
       <label>Requests / min (0 = off)<input id="pRpm" type="number" min="0"></label>

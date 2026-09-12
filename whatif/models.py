@@ -20,6 +20,11 @@ class Persona:
     stance: str = ""
     style: str = ""
     resources: str = ""
+    background: str = ""      # track record; how they behaved in past crises
+    playbook: str = ""        # characteristic moves
+    relationships: str = ""   # allies, rivals, dependencies
+    red_lines: str = ""       # what they will not accept / will fight over
+    user_edited: bool = False
 
 
 @dataclass
@@ -51,6 +56,7 @@ class Branch:
     fork_event_id: str | None = None
     fork_date: str = ""
     knowledge_cutoff: str = ""
+    notes: str = ""                 # analyst notes / priors injected into every agent + arbiter prompt on this branch
     color: str = "#7c9cff"
     status: str = "pending"         # pending | retrieving | running | completed | failed | stopped
     progress: float = 0.0
@@ -84,6 +90,7 @@ class Scenario:
     created_at: str = ""
     status: str = "new"           # new | retrieving | ready | failed
     error: str = ""
+    notes: str = ""               # analyst notes / priors about the actors (used in casting and all branches)
     wiki_titles: list[str] = field(default_factory=list)
     event_titles: list[str] = field(default_factory=list)
     user_docs: list[dict] = field(default_factory=list)

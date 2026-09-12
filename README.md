@@ -26,7 +26,13 @@ in **Google Colab** on `localhost`, with **any OpenAI-compatible model** — an 
    happens, scores each event's **divergence from the parent lane** in the same window, updates indicators
    (tension, public support, economic stress) and each agent's memory. Branches can be forked from branches.
 6. **Analyse.** Each finished lane gets a report: narrative, mechanism, probability estimate, key divergences,
-   signposts, whether it converges back to the parent. **Interview** any agent inside any lane; **compare** two lanes.
+   signposts, the assumptions it rests on, whether it converges back to the parent. **Interview** any agent inside any
+   lane; **compare** two lanes.
+7. **Steer.** You usually know the actors better than the model does. Every persona is **editable** (track record,
+   playbook, relationships, red lines), you can **add** actors or **recast** with guidance, and **analyst notes** on the
+   scenario or on a single fork are injected into every agent and arbiter prompt as expert priors. Set a **strong
+   model** (e.g. `gpt-4.1`) for the judgement roles — casting, arbiter, reports, history extraction — while agents run
+   on a cheap one.
 
 ## Run in Colab
 
@@ -45,7 +51,7 @@ python -m whatif --provider mock
 ```
 
 Env vars use the same names as go-mirofish (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL_NAME`) plus
-`WHATIF_PROVIDER` for a preset. Everything can also be changed at runtime from the provider chip in the top bar.
+`WHATIF_PROVIDER` for a preset and `WHATIF_STRONG_MODEL` for the judgement-role model. Everything can also be changed at runtime from the provider chip in the top bar.
 
 | preset | base URL | default model | cost |
 |---|---|---|---|
@@ -71,6 +77,7 @@ Knobs: max rounds (per fork or globally), agents per scenario, `WHATIF_CONCURREN
 | `GET /api/scenarios/{id}` | full state: personas, docs, branches, events, reports, log |
 | `POST /api/scenarios/{id}/fork` | `{parent_branch_id, fork_event_id?, fork_date?, premise, name?, max_rounds?, step_days?}` |
 | `POST …/branches/{bid}/stop`, `DELETE …/branches/{bid}` | |
+| `PATCH …/personas/{pid}` (or `/personas/new`), `DELETE …/personas/{pid}`, `POST …/recast` `{notes}` | edit the cast |
 | `POST …/branches/{bid}/interview` | `{persona_id, question}` |
 | `GET …/compare?a=&b=` | LLM comparison of two lanes |
 | `GET /api/events` | SSE stream (log lines, agent actions, LLM calls, progress) |

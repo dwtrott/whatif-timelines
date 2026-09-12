@@ -115,7 +115,8 @@ class LLM:
 
     # ------------------------------------------------------------------ calls
     async def chat(self, messages: list[dict], *, temperature: float | None = None,
-                   max_tokens: int = 1400, json_mode: bool = False, kind: str = "", ctx: dict | None = None) -> str:
+                   max_tokens: int = 1400, json_mode: bool = False, kind: str = "", ctx: dict | None = None,
+                   model: str | None = None) -> str:
         if self.is_mock:
             await asyncio.sleep(0.05 + random.random() * 0.1)
             self.calls += 1
@@ -125,7 +126,7 @@ class LLM:
             return out
 
         payload: dict[str, Any] = {
-            "model": self.s.model,
+            "model": model or self.s.model,
             "messages": messages,
             "temperature": self.s.temperature if temperature is None else temperature,
             "max_tokens": max_tokens,
@@ -227,13 +228,16 @@ class LLM:
             self.tokens_in += int(usage.get("prompt_tokens") or 0)
             self.tokens_out += int(usage.get("completion_tokens") or 0)
             if self.on_call:
-                self.on_call({"kind": kind, "model": self.s.model, "ms": ms,
+                self.on_call({"kind": kind, "model": payload["model"], "ms": ms,
                               "tokens": int(usage.get("total_tokens") or 0)})
             return content
         raise LLMError(f"LLM call failed after retries: {last_err}")
 
     async def json(self, system: str, user: str, *, kind: str = "", ctx: dict | None = None,
-                   max_tokens: int = 1800, temperature: float | None = None, retries: int = 2) -> dict:
+                   max_tokens: int = 1800, temperature: float | None = None, retries: int = 2,
+                   strong: bool = False) -> dict:
+        """strong=True routes to settings.strong_model when one is configured."""
+        model = (self.s.strong_model or None) if strong else None
         messages = [
             {"role": "system", "content": system + "\n\nRespond with a single valid JSON object and nothing else."},
             {"role": "user", "content": user},
@@ -241,7 +245,7 @@ class LLM:
         last = ""
         for attempt in range(retries + 1):
             last = await self.chat(messages, json_mode=True, kind=kind, ctx=ctx, max_tokens=max_tokens,
-                                   temperature=temperature)
+                                   temperature=temperature, model=model)
             obj = extract_json(last)
             if obj is not None:
                 return obj

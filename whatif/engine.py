@@ -82,6 +82,7 @@ class Engine:
             n_agents=max(2, min(12, int(payload.get("n_agents") or 6))),
             created_at=datetime.utcnow().isoformat(timespec="seconds"),
             wiki_titles=[t.strip() for t in payload.get("wiki_titles", []) if t.strip()],
+            notes=(payload.get("notes") or "").strip(),
             user_docs=[d for d in payload.get("user_docs", []) if (d.get("text") or "").strip()],
             provider=self.s.public(),
         )
@@ -143,20 +144,6 @@ class Engine:
             # 3. baseline briefing + personas
             self._log(sc, f"Grounding: building a knowledge-cutoff briefing as of {persona_cutoff}…")
             briefing, flags = await self._ground(sc, docs, persona_cutoff, premise="")
-            self._log(sc, f"Casting {sc.n_agents} agents…")
-            out = await self.llm.json(P.fill(P.PERSONAS_SYS, n=sc.n_agents), P.fill(P.PERSONAS_USER, 
-                title=sc.title, question=sc.question, cutoff=persona_cutoff, briefing=briefing[:12000]),
-                kind="personas", ctx={"n": sc.n_agents, "seed": sc.id})
-            sc.personas = []
-            for p in out.get("personas", [])[: sc.n_agents]:
-                if not isinstance(p, dict) or not p.get("name"):
-                    continue
-                sc.personas.append(Persona(id=new_id("p"), name=str(p.get("name")), role=str(p.get("role", "")),
-                                           goals=str(p.get("goals", "")), stance=str(p.get("stance", "")),
-                                           style=str(p.get("style", "")), resources=str(p.get("resources", ""))))
-            if len(sc.personas) < 2:
-                raise RuntimeError("persona casting returned fewer than 2 agents")
-            self._log(sc, "Cast: " + "; ".join(p.name for p in sc.personas))
 
             # 4. actual baseline (what really happened between anchor and min(today, horizon))
             actual_end = min(today, sc.horizon_date)
@@ -180,7 +167,7 @@ class Engine:
                 dates = sc.dates_for(sc.anchor_date, min(8, sc.rounds_between(sc.anchor_date, actual_end)))
                 out = await self.llm.json(P.ACTUAL_SYS, P.fill(P.ACTUAL_USER, 
                     start=sc.anchor_date, end=actual_end, title=sc.title, question=sc.question, raw=raw),
-                    kind="actual_events", ctx={"dates": dates, "topic": sc.title, "seed": sc.id}, max_tokens=3000)
+                    kind="actual_events", ctx={"dates": dates, "topic": sc.title, "seed": sc.id}, max_tokens=3000, strong=True)
                 for i, e in enumerate(out.get("events", [])):
                     d = _safe_date(e.get("date"), sc.anchor_date, actual_end)
                     if not d:
@@ -197,6 +184,11 @@ class Engine:
             base.events.insert(0, Event(id=new_id("ev"), branch_id=base.id, date=sc.anchor_date, headline="Scenario start",
                                         summary=f"Baseline timeline begins. Knowledge is grounded as of {persona_cutoff}.",
                                         kind="fork", importance=2, round=-1))
+            # cast AFTER the actual timeline exists so the casting call sees who actually mattered
+            self._log(sc, f"Casting {sc.n_agents} agents…")
+            sc.personas = await self._cast(sc, briefing, persona_cutoff, sc.n_agents,
+                                           timeline_txt=P.format_timeline(base.events))
+            self._log(sc, "Cast: " + "; ".join(p.name for p in sc.personas))
             base.status = "completed"
             base.progress = 1.0
             sc.status = "ready"
@@ -216,6 +208,70 @@ class Engine:
             self._log(sc, f"Preparation failed: {sc.error}", "error")
             log.error(traceback.format_exc())
             self.store.save(sc)
+
+    async def _cast(self, sc: Scenario, briefing: str, cutoff: str, n: int, timeline_txt: str = "",
+                    extra_notes: str = "") -> list[Persona]:
+        out = await self.llm.json(
+            P.fill(P.PERSONAS_SYS, n=n, notes_block=P.notes_block(sc.notes, extra_notes)),
+            P.fill(P.PERSONAS_USER, title=sc.title, question=sc.question, cutoff=cutoff, briefing=briefing[:12000],
+                   timeline=timeline_txt or "(none)"),
+            kind="personas", ctx={"n": n, "seed": sc.id}, max_tokens=3200, strong=True)
+        personas: list[Persona] = []
+        for p in out.get("personas", [])[:n]:
+            if not isinstance(p, dict) or not p.get("name"):
+                continue
+            g = lambda k: str(p.get(k, "") or "")  # noqa: E731
+            personas.append(Persona(id=new_id("p"), name=g("name"), role=g("role"), goals=g("goals"), stance=g("stance"),
+                                    style=g("style"), resources=g("resources"), background=g("background"),
+                                    playbook=g("playbook"), relationships=g("relationships"), red_lines=g("red_lines")))
+        if len(personas) < 2:
+            raise RuntimeError("persona casting returned fewer than 2 agents")
+        return personas
+
+    async def recast(self, sid: str, notes: str = "", n: int | None = None) -> list[Persona]:
+        """Re-run casting with extra analyst guidance; keeps user-edited personas."""
+        sc = self.store.get(sid)
+        if not sc or not sc.baseline_branch_id:
+            raise KeyError("scenario not ready")
+        base = sc.branches[sc.baseline_branch_id]
+        keep = [p for p in sc.personas if p.user_edited]
+        want = max(2, (n or sc.n_agents) - len(keep))
+        kept_names = ", ".join(p.name for p in keep) or "none"
+        fresh = await self._cast(sc, base.briefing, base.knowledge_cutoff, want,
+                                 timeline_txt=P.format_timeline(base.events),
+                                 extra_notes=(notes + f"\nAlready cast (do not duplicate): {kept_names}").strip())
+        sc.personas = keep + fresh
+        if notes:
+            sc.notes = (sc.notes + "\n" + notes).strip()
+        self.store.save(sc)
+        self._log(sc, "Recast: " + "; ".join(p.name for p in sc.personas))
+        return sc.personas
+
+    def update_persona(self, sid: str, pid: str, fields: dict) -> Persona:
+        sc = self.store.get(sid)
+        if not sc:
+            raise KeyError("scenario not found")
+        p = next((x for x in sc.personas if x.id == pid), None)
+        if pid == "new":
+            p = Persona(id=new_id("p"), name=str(fields.get("name") or "New actor"), role="", goals="")
+            sc.personas.append(p)
+        if not p:
+            raise KeyError("persona not found")
+        for k in ("name", "role", "goals", "stance", "style", "resources", "background", "playbook", "relationships", "red_lines"):
+            if k in fields and fields[k] is not None:
+                setattr(p, k, str(fields[k]))
+        p.user_edited = True
+        self.store.save(sc)
+        return p
+
+    def delete_persona(self, sid: str, pid: str) -> bool:
+        sc = self.store.get(sid)
+        if not sc:
+            raise KeyError("scenario not found")
+        before = len(sc.personas)
+        sc.personas = [x for x in sc.personas if x.id != pid]
+        self.store.save(sc)
+        return len(sc.personas) < before
 
     async def retriever_safe(self, fn, *a, **k):
         try:
@@ -271,7 +327,8 @@ class Engine:
 
     # ------------------------------------------------------------------ branches
     def fork(self, sid: str, parent_id: str, fork_event_id: str | None, premise: str, name: str = "",
-             fork_date: str | None = None, step_days: int | None = None, max_rounds: int | None = None) -> Branch:
+             fork_date: str | None = None, step_days: int | None = None, max_rounds: int | None = None,
+             notes: str = "") -> Branch:
         sc = self.store.get(sid)
         if not sc:
             raise KeyError("scenario not found")
@@ -297,7 +354,7 @@ class Engine:
             step = max(1, math.ceil(days / cap))
         br = Branch(id=new_id("br"), scenario_id=sc.id, name=name, kind=kind, premise=premise,
                     parent_branch_id=parent.id, fork_event_id=ev.id if ev else None, fork_date=fdate,
-                    knowledge_cutoff=fdate, color=BRANCH_COLORS[idx], status="pending", total_rounds=rounds,
+                    knowledge_cutoff=fdate, notes=(notes or "").strip(), color=BRANCH_COLORS[idx], status="pending", total_rounds=rounds,
                     step_days=step, created_at=datetime.utcnow().isoformat(timespec="seconds"), depth=parent.depth + 1)
         br.events.append(Event(id=new_id("ev"), branch_id=br.id, date=fdate,
                                headline=("What if: " + premise[:110]) if premise else "Forecast begins",
@@ -346,6 +403,10 @@ class Engine:
             self.store.save(sc)
             self._log(sc, f"[{br.name}] Retrieving knowledge as of {br.knowledge_cutoff}…", branch_id=br.id)
             docs = await self._docs_for(sc, date.fromisoformat(br.knowledge_cutoff), [], want_latest=False)
+            n_ev = sum(1 for d in docs if d.source == "wikipedia_asof" and d.title in sc.event_titles)
+            self._log(sc, f"[{br.name}] {sum(1 for d in docs if d.source == 'wikipedia_asof')} article revisions as of "
+                          f"{br.knowledge_cutoff}" + (f" (incl. {n_ev} event article{'s' if n_ev != 1 else ''})" if n_ev else ""),
+                      branch_id=br.id)
             if not docs:
                 # fall back to whatever the scenario has (as-of docs from the persona cutoff)
                 docs = [Doc(**d) for d in sc.docs if d.get("source") in ("wikipedia_asof", "user", "gdelt")]
@@ -366,13 +427,16 @@ class Engine:
                 async def step(p: Persona):
                     out = await self.llm.json(
                         P.fill(P.AGENT_SYS, name=p.name, role=p.role, date=d, cutoff=br.knowledge_cutoff, goals=p.goals,
-                                           stance=p.stance, style=p.style, resources=p.resources),
+                                           stance=p.stance, style=p.style, resources=p.resources,
+                                           background=p.background or "(not documented)", playbook=p.playbook or "(not documented)",
+                                           relationships=p.relationships or "(not documented)", red_lines=p.red_lines or "(not documented)"),
                         P.fill(P.AGENT_USER, premise_block=P.premise_block(br.premise, br.fork_date),
+                                            notes_block=P.notes_block(sc.notes, br.notes),
                                             cutoff=br.knowledge_cutoff, briefing=br.briefing[:self.s.brief_chars],
                                             timeline=timeline_txt, memory=br.agent_memory.get(p.name, "(none)"),
                                             world_state=br.world_state or "(start of simulation)", date=d),
                         kind="agent_step", ctx={"name": p.name, "date": d, "premise": br.premise, "topic": sc.title,
-                                                "seed": br.id}, max_tokens=700)
+                                                "seed": br.id}, max_tokens=900)
                     return {"persona_id": p.id, "name": p.name, "role": p.role,
                             "thoughts": str(out.get("thoughts", ""))[:600], "action": str(out.get("action", ""))[:400],
                             "statement": str(out.get("statement", ""))[:400],
@@ -400,11 +464,12 @@ class Engine:
                                         + (f" Says: {a['statement']}" if a["statement"] else "") for a in actions)
                 out = await self.llm.json(
                     P.fill(P.ARBITER_SYS, date=d, cutoff=br.knowledge_cutoff),
-                    P.fill(P.ARBITER_USER, premise_block=P.premise_block(br.premise, br.fork_date), cutoff=br.knowledge_cutoff,
+                    P.fill(P.ARBITER_USER, premise_block=P.premise_block(br.premise, br.fork_date),
+                                          notes_block=P.notes_block(sc.notes, br.notes), cutoff=br.knowledge_cutoff,
                                           briefing_short=br.briefing[:self.s.brief_chars // 2], timeline=timeline_txt,
                                           parent_block=parent_block, actions=actions_txt, date=d),
                     kind="arbiter", ctx={"date": d, "premise": br.premise, "topic": sc.title, "seed": br.id + d,
-                                         "has_parent": bool(parent)}, max_tokens=1600)
+                                         "has_parent": bool(parent)}, max_tokens=1800, strong=True)
                 new_events = []
                 for e in (out.get("events") or [])[:3]:
                     if not isinstance(e, dict):
@@ -475,7 +540,7 @@ class Engine:
             title=sc.title, question=sc.question, name=br.name, premise_block=P.premise_block(br.premise, br.fork_date),
             fork_date=br.fork_date, horizon=sc.horizon_date, parent_block=parent_block,
             timeline=P.format_timeline([e for e in br.events]), world_state=br.world_state),
-            kind="report", ctx={"premise": br.premise, "topic": sc.title, "seed": br.id}, max_tokens=2200, temperature=0.4)
+            kind="report", ctx={"premise": br.premise, "topic": sc.title, "seed": br.id}, max_tokens=2400, temperature=0.4, strong=True)
         out["probability_estimate"] = _float(out.get("probability_estimate"), 0.5)
         return out
 
@@ -506,7 +571,7 @@ class Engine:
             title=sc.title, question=sc.question, a_name=a.name, a_premise=a.premise or "(actual/baseline)",
             a_timeline=P.format_timeline(self.lineage_events(sc, a)), b_name=b.name, b_premise=b.premise or "(actual/baseline)",
             b_timeline=P.format_timeline(self.lineage_events(sc, b))),
-            kind="compare", ctx={"seed": a_id + b_id, "topic": sc.title}, max_tokens=1600, temperature=0.4)
+            kind="compare", ctx={"seed": a_id + b_id, "topic": sc.title}, max_tokens=1800, temperature=0.4, strong=True)
         return out
 
 

@@ -186,8 +186,10 @@ class Retriever:
                 except Exception as e:  # noqa: BLE001
                     self._err(f"Wikipedia '{title}'", e)
 
+        # Event articles: present-day only when building the baseline (they postdate the anchor); as-of the cutoff
+        # for branches (a fork inside the crisis should know the crisis so far).
         await asyncio.gather(*(one(t) for t in titles),
-                             *((one(t, True) for t in (event_titles or [])) if want_latest else ()))
+                             *(one(t, latest_only=want_latest) for t in (event_titles or []) if t not in titles))
         return docs
 
     # ------------------------------------------------------------ gdelt

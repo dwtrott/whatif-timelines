@@ -73,6 +73,8 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
                             base_url=(body.get("base_url") or "").strip() or None,
                             model=(body.get("model") or "").strip() or None,
                             concurrency=body.get("concurrency"), rpm=body.get("rpm"))
+        if "strong_model" in body:
+            new.strong_model = (body.get("strong_model") or "").strip()
         if provider and not body.get("api_key") and engine.s.provider == provider:
             new.api_key = engine.s.api_key  # keep the existing key when only the model changes
         if body.get("max_rounds"):
@@ -170,13 +172,39 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
             br = engine.fork(sid, body.get("parent_branch_id"), body.get("fork_event_id"), body.get("premise", ""),
                              name=body.get("name", ""), fork_date=body.get("fork_date") or None,
                              step_days=int(body["step_days"]) if body.get("step_days") else None,
-                             max_rounds=int(body["max_rounds"]) if body.get("max_rounds") else None)
+                             max_rounds=int(body["max_rounds"]) if body.get("max_rounds") else None,
+                             notes=body.get("notes", ""))
         except KeyError as e:
             raise HTTPException(404, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
         sc = store.get(sid)
         return {"branch_id": br.id, "scenario": sc.to_dict()}
+
+    @app.patch("/api/scenarios/{sid}/personas/{pid}")
+    async def update_persona(sid: str, pid: str, req: Request):
+        try:
+            from dataclasses import asdict
+            return asdict(engine.update_persona(sid, pid, await req.json()))
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+
+    @app.delete("/api/scenarios/{sid}/personas/{pid}")
+    async def delete_persona(sid: str, pid: str):
+        try:
+            return {"deleted": engine.delete_persona(sid, pid)}
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+
+    @app.post("/api/scenarios/{sid}/recast")
+    async def recast(sid: str, req: Request):
+        body = await req.json()
+        try:
+            from dataclasses import asdict
+            ps = await engine.recast(sid, notes=body.get("notes", ""), n=int(body["n"]) if body.get("n") else None)
+            return {"personas": [asdict(p) for p in ps]}
+        except KeyError as e:
+            raise HTTPException(404, str(e))
 
     @app.post("/api/scenarios/{sid}/branches/{bid}/stop")
     async def stop_branch(sid: str, bid: str):

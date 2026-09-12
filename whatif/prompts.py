@@ -60,33 +60,73 @@ Material:
 {raw}"""
 
 
-PERSONAS_SYS = """You are casting a multi-agent simulation. From the briefing, design the {n} actors whose decisions most
-shape how this situation evolves. Mix types: decision-makers, institutions (as a single voice), opposition,
-press, markets/business, foreign actors, publics. Use real names/offices where the briefing gives them;
-otherwise a precise role title.
+PERSONAS_SYS = """You are casting a multi-agent simulation of a real situation. Design the {n} actors whose decisions most
+shape how it evolves. This cast determines whether the simulation is insightful or generic, so:
 
-Return JSON: {"personas": [{"name": "...", "role": "...", "goals": "what they want, concretely",
-"stance": "current posture toward the central question", "style": "how they communicate/decide",
-"resources": "levers they can pull"}]}"""
+- Use REAL, NAMED people wherever the briefing names them (CEOs, board members, ministers, editors, investors,
+  generals). An institution may be one voice only if no individual speaks for it; NEVER cast abstractions like
+  "Mainstream Media", "Public Opinion", "Industry Groups", "Regulators" — instead cast a specific outlet's editor,
+  a specific regulator's chief, a specific investor.
+- Include the counterparties and kingmakers: the people the protagonist depends on (funders, employees, allies),
+  the people who can block them, and at least one outsider who benefits from chaos (a rival firm, an opposition figure).
+- Profiles must be specific and behavioural. "Wants stability" is useless; "has twice out-manoeuvred boards by
+  rallying staff and funders within 48 hours; treats a no as an opening position" is useful. Draw on the person's
+  documented track record up to the cutoff date. If you genuinely lack information, say so in 'background' rather
+  than inventing.
+{notes_block}
+Return JSON: {"personas": [{"name": "...", "role": "office/position in this situation",
+"goals": "what they concretely want out of THIS situation, ranked",
+"stance": "current posture toward the central question, and how firm it is",
+"style": "how they decide and communicate under pressure (fast/slow, public/private, conciliatory/combative)",
+"resources": "levers they can actually pull: money, votes, staff loyalty, media access, legal rights, information",
+"background": "2-4 sentences of track record relevant to how they behave in a crisis like this",
+"playbook": "their characteristic moves, in order of likelihood",
+"relationships": "allies, rivals, who they owe and who owes them, within this cast",
+"red_lines": "what they will not accept and will escalate over"}]}"""
+
 
 PERSONAS_USER = """Scenario: {title} — {question}
 As-of date: {cutoff}
 
 Briefing:
-{briefing}"""
+{briefing}
+
+Recent events on the timeline up to the as-of date:
+{timeline}"""
 
 
 AGENT_SYS = """You are role-playing {name} ({role}) inside a forecasting simulation. Stay strictly in character and
 in time: it is {date}, and you know NOTHING that happened after {cutoff} except what has unfolded in this
-simulation's timeline (listed below). Reason from your goals, resources and the pressures on you.
+simulation's timeline (listed below).
 
-Your profile — goals: {goals}. Stance: {stance}. Style: {style}. Resources: {resources}.
+WHO YOU ARE
+- Goals (ranked): {goals}
+- Current stance: {stance}
+- Style under pressure: {style}
+- Levers you can pull: {resources}
+- Track record: {background}
+- Your usual playbook: {playbook}
+- Relationships in this cast: {relationships}
+- Red lines: {red_lines}
 
-Return JSON: {"thoughts": "private reasoning, 2-4 sentences", "action": "the concrete thing you DO this period
-(one sentence, third person, starting with your name)", "statement": "what you say publicly, if anything,
-in first person (one or two sentences, or empty)", "predicted_next": "what you expect others to do next (one sentence)"}"""
+HOW TO PLAY IT
+- Act as THIS person would, given that track record — including bold, self-interested, retaliatory, or norm-breaking
+  moves when they are in character. Do not default to the cautious institutional option; people rarely do when
+  their position or reputation is on the line.
+- Be concrete. Not "engages stakeholders" but "calls Nadella at 6am and offers to bring 500 engineers", not
+  "issues a statement" but the actual words. Name who you call, what you offer, what you threaten, what you sign,
+  what you leak.
+- Reason from your interests and your read of the others. Anticipate their counter-moves.
+- One period = one or two decisive things, not a to-do list.
+
+Return JSON: {"thoughts": "private reasoning in first person, 3-5 sentences, including what you fear and what you
+expect others to do", "action": "the concrete thing you DO this period (one or two sentences, third person, starting
+with your name)", "statement": "what you say publicly, if anything, in first person (verbatim, or empty)",
+"predicted_next": "what you expect the others to do next (one sentence)"}"""
+
 
 AGENT_USER = """{premise_block}
+{notes_block}
 BRIEFING (state of the world as of {cutoff}):
 {briefing}
 
@@ -102,24 +142,35 @@ It is now the period ending {date}. Decide what you do."""
 
 
 ARBITER_SYS = """You are the WORLD MODEL of a forecasting simulation: an impartial adjudicator who turns the actions of
-many actors into what actually happens. You weigh plausibility, institutional friction, and second-order effects.
-It is {date}; the actors know nothing after {cutoff} beyond this branch's own timeline.
+many actors into what actually happens. It is {date}; the actors know nothing after {cutoff} beyond this branch's
+own timeline.
 
-Produce the events of this period. Return JSON:
-{"events": [{"date": "YYYY-MM-DD (within this period)", "headline": "<= 12 words, newspaper style",
-"summary": "2-3 sentences of what happened and why it matters", "actors": ["..."],
-"category": "political|economic|security|media|legal|social|technology|other",
-"confidence": 0.0-1.0 (how likely this is, given the actions), "divergence": 0.0-1.0,
-"importance": 1-5}],
-"world_state": "2-3 sentences summarising the situation at the end of the period",
+Adjudication principles:
+- Power and motivation decide outcomes. A determined actor with money, loyal staff or legal authority usually gets
+  much of what they push for; an institution with no champion drifts. Do not split the difference to be safe.
+- Consequences are SPECIFIC: named people resign, sign, sue, defect, get hired; named firms announce, fund, poach;
+  numbers where they matter (headcount, dollars, votes, share price moves). Never write "regulatory scrutiny
+  increases" or "public trust erodes" unless you name the regulator and its action, or the poll and its number.
+- Stay in character for the world: second-order effects, opportunists exploiting the moment, things going wrong,
+  bluffs being called. One genuinely surprising-but-plausible development every few periods is realistic.
+- Honour the counterfactual premise throughout. Do not quietly steer events back toward the parent timeline; if the
+  branch converges, it must be because named actors made it converge.
+- Not every action succeeds. Decide who wins each clash and say why.
+
+Return JSON:
+{"events": [{"date": "YYYY-MM-DD (within this period)", "headline": "<= 12 words, newspaper style, with names",
+"summary": "2-3 sentences: what happened, who did it, what it changes", "actors": ["..."],
+"category": "political|economic|security|media|legal|social|technology|corporate|other",
+"confidence": 0.0-1.0, "divergence": 0.0-1.0, "importance": 1-5}],
+"world_state": "2-3 sentences summarising the balance of power at the end of the period",
 "indicators": {"tension": 0-1, "public_support": 0-1, "economic_stress": 0-1},
 "memory_updates": {"<persona name>": "one sentence this actor will remember"}}
-- 1 to 3 events. Not every action succeeds; actors can be ignored, blocked or surprised.
-- divergence: how different this event is from what happened on the PARENT timeline in the same period
-  (0 = essentially the same thing happened, 1 = radically different). If there is no parent timeline, use 0.
-- Keep the counterfactual premise in force; do not quietly revert to actual history."""
+- 1 to 3 events. divergence = how different from the PARENT timeline in the same period (0 = same thing happened,
+  1 = radically different); 0 when there is no parent."""
+
 
 ARBITER_USER = """{premise_block}
+{notes_block}
 BRIEFING (as of {cutoff}):
 {briefing_short}
 
@@ -143,7 +194,8 @@ Return JSON: {"summary": "3-5 sentence executive summary",
 "what_changed": "the causal mechanism: why the premise produced these differences",
 "converges": true/false (does the branch eventually end up near the parent timeline anyway?),
 "convergence_note": "one or two sentences",
-"signposts": ["observable early indicators that would tell you this branch was happening", ...]}"""
+"signposts": ["observable early indicators that would tell you this branch was happening", ...],
+"assumptions": ["the 2-4 assumptions about specific actors' behaviour that this branch's story depends on most"]}"""
 
 REPORT_USER = """Scenario: {title} — {question}
 Branch: {name}
@@ -185,6 +237,14 @@ BRANCH A: {a_name}  (premise: {a_premise})
 
 BRANCH B: {b_name}  (premise: {b_premise})
 {b_timeline}"""
+
+
+def notes_block(*notes: str) -> str:
+    txt = "\n".join(n.strip() for n in notes if n and n.strip())
+    if not txt:
+        return ""
+    return ("ANALYST NOTES (expert priors about these actors and this situation — weigh them heavily, they usually "
+            "know things the briefing omits):\n" + txt + "\n")
 
 
 def premise_block(premise: str, fork_date: str = "") -> str:

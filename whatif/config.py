@@ -106,6 +106,7 @@ class Settings:
     model: str
     concurrency: int
     rpm: int
+    strong_model: str = ""       # optional bigger model for judgement roles (casting, arbiter, report, compare, history)
     timeout: float = 120.0
     temperature: float = 0.7
     data_dir: str = "data"
@@ -129,6 +130,7 @@ class Settings:
             "provider": self.provider,
             "base_url": self.base_url,
             "model": self.model,
+            "strong_model": self.strong_model,
             "concurrency": self.concurrency,
             "rpm": self.rpm,
             "has_key": bool(self.api_key) or self.provider in ("ollama", "mock"),
@@ -196,6 +198,7 @@ def load_settings(**overrides) -> Settings:
     )
     if _env("WHATIF_USER_AGENT"):
         s.user_agent = _env("WHATIF_USER_AGENT")
+    s.strong_model = _env("WHATIF_STRONG_MODEL", "LLM_STRONG_MODEL")
     for k, v in overrides.items():
         if hasattr(s, k) and v is not None:
             setattr(s, k, v)

@@ -68,13 +68,15 @@ You can also change provider/key/model later from the **provider chip** in the G
 
 code("""PROVIDER = "openai"      # openai | cerebras | groq | gemini | openrouter | ollama | mock
 API_KEY  = ""            # leave empty to use a Colab secret / env var
-MODEL    = ""            # leave empty for the preset default (e.g. gpt-4o-mini, llama-3.3-70b, gemini-2.5-flash)
+MODEL    = ""            # agents' model; empty = preset default (gpt-4o-mini, llama-3.3-70b, gemini-2.5-flash …)
+STRONG_MODEL = "gpt-4.1" # judgement roles (casting, arbiter, reports, history). "" = same as MODEL. OpenAI only by default.
 MAX_ROUNDS = 12          # simulation periods per branch (cost ≈ rounds × (agents+1) LLM calls)
 
 import os
 os.environ["WHATIF_PROVIDER"] = PROVIDER
 if API_KEY: os.environ["LLM_API_KEY"] = API_KEY
 if MODEL:   os.environ["LLM_MODEL_NAME"] = MODEL
+if STRONG_MODEL and PROVIDER == "openai": os.environ["WHATIF_STRONG_MODEL"] = STRONG_MODEL
 # pull keys from Colab secrets if present
 try:
     from google.colab import userdata

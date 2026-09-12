@@ -43,7 +43,7 @@ async function boot() {
 async function loadConfig() {
   state.config = await api('/api/config');
   const s = state.config.settings;
-  $('#providerLabel').textContent = `${s.provider} · ${s.model}`;
+  $('#providerLabel').textContent = `${s.provider} · ${s.model}${s.strong_model ? ' + ' + s.strong_model : ''}`;
   $('#providerDot').className = 'dot ' + (s.has_key ? 'ok' : 'bad');
   const st = state.config.stats;
   $('#llmStats').textContent = st.calls ? `${st.calls} calls · ${(st.tokens_in + st.tokens_out).toLocaleString()} tok` : '';
@@ -380,6 +380,7 @@ function renderEventDetail(box) {
     ${canFork ? `<div class="dsec forkForm">
       <h4>What if… (fork from ${fmtD(e.date)})</h4>
       <textarea id="forkPremise" placeholder="Describe the counterfactual that becomes true at this point, e.g. “${esc(examplePremise(sc, e))}”"></textarea>
+      <label>Analyst notes for this branch (optional — priors about how specific actors will behave)<textarea id="forkNotes" rows="2" placeholder="e.g. Altman will not go quietly: expect him to take staff and funders with him within days."></textarea></label>
       <div class="grid2">
         <label>Branch name (optional)<input id="forkName"></label>
         <label>Max rounds<input id="forkRounds" type="number" min="1" max="60" value="${state.config?.max_rounds || 12}"></label>
@@ -412,8 +413,9 @@ async function doFork(parentId, eventId, dateOverride) {
   const premise = $('#forkPremise')?.value.trim() || '';
   const name = $('#forkName')?.value.trim() || '';
   const rounds = parseInt($('#forkRounds')?.value || '0', 10) || undefined;
+  const notes = $('#forkNotes')?.value.trim() || '';
   try {
-    const res = await api(`/api/scenarios/${state.sc.id}/fork`, 'POST', {parent_branch_id: parentId, fork_event_id: eventId, premise, name, max_rounds: rounds, fork_date: dateOverride});
+    const res = await api(`/api/scenarios/${state.sc.id}/fork`, 'POST', {parent_branch_id: parentId, fork_event_id: eventId, premise, name, max_rounds: rounds, fork_date: dateOverride, notes});
     state.sc = res.scenario;
     selectBranch(res.branch_id);
     schedulePoll();
@@ -430,6 +432,7 @@ function forkAtDate(bid) {
     <div class="dsec forkForm">
       <label>Fork date (${minD} … ${state.sc.horizon_date})<input id="forkDate" type="date" min="${minD}" max="${state.sc.horizon_date}" value="${lastEv ? lastEv.date : minD}"></label>
       <label>What if…<textarea id="forkPremise" placeholder="Counterfactual premise that becomes true on that date (leave empty for a plain forecast)"></textarea></label>
+      <label>Analyst notes for this branch (optional)<textarea id="forkNotes" rows="2"></textarea></label>
       <div class="grid2"><label>Branch name<input id="forkName"></label><label>Max rounds<input id="forkRounds" type="number" min="1" max="60" value="${state.config?.max_rounds || 12}"></label></div>
       <div class="row end"><button class="primary" onclick="doFork('${b.id}', null, $('#forkDate').value)">⑂ Fork timeline</button></div>
     </div>`;
@@ -447,6 +450,7 @@ function renderBranchDetail(box) {
       <div class="kicker"><span style="color:${b.color}">● lane</span><span class="status ${b.status}">${b.status}</span>${parent ? `<span>forked from ${esc(parent.name)} @ ${b.fork_date}</span>` : ''}</div>
       <h2>${esc(b.name)}</h2>
       <div class="muted">${b.premise ? '<b>What if:</b> ' + esc(b.premise) : (b.kind === 'actual' ? 'Actual history extracted from present-day sources.' : 'Baseline forecast, no intervention.')}</div>
+      ${b.notes ? `<div class="muted small" style="margin-top:4px"><b>Analyst notes:</b> ${esc(b.notes)}</div>` : ''}
       <div class="kv" style="margin-top:8px">
         <b>knowledge cutoff</b><span>${fmtD(b.knowledge_cutoff)}</span>
         <b>periods</b><span>${b.total_rounds ? `${b.rounds_done}/${b.total_rounds} × ${b.step_days} days` : b.events.length + ' events'}</span>
@@ -462,6 +466,7 @@ function renderBranchDetail(box) {
     ${r.summary ? `<div class="dsec"><h4>Report</h4><div class="md"><p><b>${esc(r.summary)}</b></p>${md(r.narrative || '')}</div>
         ${r.what_changed ? `<p class="small"><b>Mechanism:</b> ${esc(r.what_changed)}</p>` : ''}
         ${(r.key_divergences || []).length ? `<h4 style="margin-top:10px">Key divergences</h4><ul class="md">${r.key_divergences.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+        ${(r.assumptions || []).length ? `<h4 style="margin-top:10px">Rests on these assumptions</h4><ul class="md">${r.assumptions.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
         ${(r.signposts || []).length ? `<h4 style="margin-top:10px">Signposts</h4><ul class="md">${r.signposts.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
         ${r.convergence_note ? `<p class="small muted">${esc(r.convergence_note)}</p>` : ''}
       </div>` : ''}
@@ -529,13 +534,55 @@ async function doCompare(bid) {
   } catch (e) { out.innerHTML = `<div class="errbox">${esc(e.message)}</div>`; }
 }
 
-function showPersona(pid) {
-  const p = state.sc.personas.find(x => x.id === pid);
+const PERSONA_FIELDS = [['name', 'Name'], ['role', 'Role'], ['goals', 'Goals (ranked)'], ['stance', 'Stance'], ['style', 'Style under pressure'],
+  ['resources', 'Levers'], ['background', 'Track record'], ['playbook', 'Playbook'], ['relationships', 'Relationships'], ['red_lines', 'Red lines']];
+
+function showPersona(pid, edit = false) {
+  const p = pid === 'new' ? {id: 'new', name: '', role: '', goals: '', stance: '', style: '', resources: '', background: '', playbook: '', relationships: '', red_lines: ''}
+    : state.sc.personas.find(x => x.id === pid);
+  if (!p) return;
   state.sel = {type: 'persona', id: pid};
-  $('#detailBody').innerHTML = `<div class="dhead"><div class="kicker">agent</div><h2>${esc(p.name)}</h2><div class="muted">${esc(p.role)}</div></div>
-    <div class="dsec"><div class="kv"><b>goals</b><span>${esc(p.goals)}</span><b>stance</b><span>${esc(p.stance)}</span><b>style</b><span>${esc(p.style)}</span><b>resources</b><span>${esc(p.resources)}</span></div></div>
-    <div class="dsec small muted">Open a branch to interview this agent inside that timeline.</div>`;
+  const box = $('#detailBody');
+  if (edit || pid === 'new') {
+    box.innerHTML = `<div class="dhead"><div class="kicker">agent · editing</div><h2>${esc(p.name || 'New actor')}</h2>
+        <div class="muted small">Your edits are kept through recasts and used by every future fork.</div></div>
+      <div class="dsec">${PERSONA_FIELDS.map(([k, label]) => `<label>${label}${k === 'name' || k === 'role' ? `<input data-k="${k}" value="${esc(p[k])}">` : `<textarea data-k="${k}" rows="${k === 'background' || k === 'playbook' ? 4 : 2}">${esc(p[k])}</textarea>`}</label>`).join('')}
+        <div class="row end"><button class="ghost" onclick="${pid === 'new' ? 'renderDetail()' : `showPersona('${pid}')`}">cancel</button><button class="primary" onclick="savePersona('${pid}')">save</button></div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="dhead"><div class="kicker">agent${p.user_edited ? ' · edited by you' : ''}</div><h2>${esc(p.name)}</h2><div class="muted">${esc(p.role)}</div>
+      <div class="row" style="margin-top:8px"><button class="small" onclick="showPersona('${pid}', true)">edit</button><button class="ghost small danger" onclick="deletePersona('${pid}')">remove</button></div></div>
+    <div class="dsec"><div class="kv">${PERSONA_FIELDS.slice(2).filter(([k]) => p[k]).map(([k, label]) => `<b>${label.toLowerCase()}</b><span>${esc(p[k])}</span>`).join('')}</div></div>
+    <div class="dsec small muted">Open a branch to interview this agent inside that timeline. Edit the profile if you know this actor better than the model does — the swarm will play them your way.</div>`;
   renderSidebar();
+}
+
+async function savePersona(pid) {
+  const fields = {};
+  $$('#detailBody [data-k]').forEach(el => fields[el.dataset.k] = el.value);
+  if (!fields.name?.trim()) return alert('Name is required.');
+  try {
+    const p = await api(`/api/scenarios/${state.sc.id}/personas/${pid}`, 'PATCH', fields);
+    await refreshScenario();
+    showPersona(p.id);
+  } catch (e) { alert(e.message); }
+}
+
+async function deletePersona(pid) {
+  if (!confirm('Remove this actor from the cast? Existing lanes keep their history; future forks run without them.')) return;
+  await api(`/api/scenarios/${state.sc.id}/personas/${pid}`, 'DELETE');
+  state.sel = null; await refreshScenario();
+}
+
+async function recastAgents() {
+  const notes = prompt('Guidance for recasting (who is missing, who to drop, how someone really behaves). Actors you edited by hand are kept.\n\nExample: "Add Satya Nadella, Greg Brockman, Emmett Shear and a spokesperson for the 700 employees. Drop the generic media actor."');
+  if (notes === null) return;
+  toast('recasting agents…');
+  try {
+    await api(`/api/scenarios/${state.sc.id}/recast`, 'POST', {notes});
+    await refreshScenario();
+    toast('recast complete');
+  } catch (e) { alert('Recast failed: ' + e.message); }
 }
 
 async function stopBranch(bid) { await api(`/api/scenarios/${state.sc.id}/branches/${bid}/stop`, 'POST'); setTimeout(refreshScenario, 500); }
@@ -578,6 +625,7 @@ async function createScenario() {
     title: $('#fTitle').value.trim(), question: $('#fQuestion').value.trim(), anchor_date: $('#fAnchor').value, horizon_date: $('#fHorizon').value,
     step_days: +$('#fStep').value || 7, n_agents: +$('#fAgents').value || 6,
     wiki_titles: $('#fTitles').value.split(',').map(s => s.trim()).filter(Boolean),
+    notes: $('#fNotes').value.trim(),
     user_docs: $('#fDocs').value.trim() ? [{title: 'Seed document', text: $('#fDocs').value}] : [],
   };
   const missing = [!body.title && 'Title', !body.anchor_date && 'Anchor date (must be a real calendar date)', !body.horizon_date && 'Horizon date (must be a real calendar date — e.g. April has 30 days)'].filter(Boolean);
@@ -599,7 +647,7 @@ function openProvider() {
   const sel = $('#pPreset');
   sel.innerHTML = c.presets.map(p => `<option value="${p.key}">${esc(p.label)}${p.free_tier ? ' · free' : ''}</option>`).join('') + '<option value="custom">Custom OpenAI-compatible</option>';
   sel.value = c.presets.some(p => p.key === s.provider) ? s.provider : 'custom';
-  $('#pBase').value = s.base_url; $('#pModel').value = s.model; $('#pConc').value = s.concurrency; $('#pRpm').value = s.rpm; $('#pRounds').value = c.max_rounds; $('#pKey').value = '';
+  $('#pBase').value = s.base_url; $('#pModel').value = s.model; $('#pStrong').value = s.strong_model || ''; $('#pConc').value = s.concurrency; $('#pRpm').value = s.rpm; $('#pRounds').value = c.max_rounds; $('#pKey').value = '';
   const notes = () => {
     const p = c.presets.find(x => x.key === sel.value);
     $('#pNotes').innerHTML = p ? `${esc(p.notes)} ${p.signup ? `<a href="${p.signup}" target="_blank" rel="noopener">get a key ↗</a>` : ''} ${p.key_env ? `· env <code>${p.key_env}</code>` : ''}` : 'Any endpoint that speaks /chat/completions.';
@@ -612,7 +660,7 @@ function openProvider() {
 
 async function saveProvider() {
   const body = {provider: $('#pPreset').value === 'custom' ? '' : $('#pPreset').value, api_key: $('#pKey').value, base_url: $('#pBase').value, model: $('#pModel').value,
-    concurrency: +$('#pConc').value || undefined, rpm: $('#pRpm').value === '' ? undefined : +$('#pRpm').value, max_rounds: +$('#pRounds').value || undefined};
+    strong_model: $('#pStrong').value, concurrency: +$('#pConc').value || undefined, rpm: $('#pRpm').value === '' ? undefined : +$('#pRpm').value, max_rounds: +$('#pRounds').value || undefined};
   if (body.provider === '' && !body.base_url) return alert('Base URL required for a custom provider.');
   $('#pResult').textContent = 'testing…';
   try {
@@ -655,6 +703,8 @@ function bindUI() {
   $('#pListModels').onclick = e => { e.preventDefault(); listModels(); };
   $('#pDiag').onclick = runDiag;
   $('#helpBtn').onclick = () => openModal('helpModal');
+  $('#addAgentBtn').onclick = () => { if (state.sc) showPersona('new'); };
+  $('#recastBtn').onclick = () => { if (state.sc?.baseline_branch_id) recastAgents(); };
   $('#consoleToggle').onclick = () => { const c = $('#console'); c.classList.toggle('collapsed'); $('#consoleToggle').textContent = c.classList.contains('collapsed') ? 'show' : 'hide'; };
   $$('.modal').forEach(m => m.addEventListener('click', e => { if (e.target === m) m.hidden = true; }));
   const scroll = $('#timelineScroll');
