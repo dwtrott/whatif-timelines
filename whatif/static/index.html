@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhatIf Timelines</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand"><span class="logo">⑂</span> WhatIf <span class="sub">Timelines</span></div>
+  <select id="scenarioSelect" title="Scenario"></select>
+  <button id="newScenarioBtn" class="primary">+ New scenario</button>
+  <div class="spacer"></div>
+  <div id="llmStats" class="muted small"></div>
+  <button id="providerChip" class="chip" title="Model provider settings"><span class="dot" id="providerDot"></span><span id="providerLabel">provider</span></button>
+  <button id="helpBtn" class="ghost" title="Help">?</button>
+</header>
+
+<main id="layout">
+  <aside id="sidebar">
+    <section class="panel">
+      <h3>Branches <span id="branchCount" class="badge"></span></h3>
+      <div id="branchList" class="list"></div>
+    </section>
+    <section class="panel">
+      <h3>Agents <span id="agentCount" class="badge"></span></h3>
+      <div id="agentList" class="list"></div>
+    </section>
+    <section class="panel">
+      <h3>Sources <span id="docCount" class="badge"></span></h3>
+      <div id="docList" class="list small"></div>
+    </section>
+  </aside>
+
+  <section id="center">
+    <div id="scenarioHeader">
+      <div>
+        <h2 id="scTitle">No scenario yet</h2>
+        <div id="scQuestion" class="muted"></div>
+      </div>
+      <div id="scMeta" class="meta"></div>
+    </div>
+    <div id="timelineWrap">
+      <div id="laneLabels"></div>
+      <div id="timelineScroll">
+        <svg id="timeline" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+      <div id="emptyState" class="empty">
+        <div class="big">⑂</div>
+        <p>Create a scenario to build a baseline timeline from real retrieved sources, then click any event and ask <em>what if…</em> to fork an alternate timeline simulated by the agent swarm.</p>
+        <button class="primary" onclick="openNewScenario()">+ New scenario</button>
+      </div>
+    </div>
+    <div id="legend" class="small muted">
+      <span><i class="lg actual"></i>actual history</span>
+      <span><i class="lg sim"></i>simulated</span>
+      <span><i class="lg premise"></i>fork / premise</span>
+      <span><i class="lg div"></i>ring = divergence from parent</span>
+      <span>size = importance · opacity = confidence</span>
+      <span class="right">scroll = pan · ctrl+wheel = zoom</span>
+    </div>
+    <div id="console">
+      <div class="consoleHead"><span>Swarm activity</span><button class="ghost small" id="consoleToggle">hide</button></div>
+      <div id="consoleBody"></div>
+    </div>
+  </section>
+
+  <aside id="detail">
+    <div id="detailBody"><div class="muted pad">Select an event or a branch.</div></div>
+  </aside>
+</main>
+
+<div id="tooltip" hidden></div>
+
+<!-- New scenario modal -->
+<div class="modal" id="newScenarioModal" hidden>
+  <div class="modalCard wide">
+    <h2>New scenario</h2>
+    <div class="examples" id="exampleChips"></div>
+    <div class="grid2">
+      <label>Title<input id="fTitle" placeholder="e.g. Cuban Missile Crisis"></label>
+      <label>Question you're studying<input id="fQuestion" placeholder="How does it play out under different choices?"></label>
+      <label>Start of baseline (anchor)<input id="fAnchor" type="date"></label>
+      <label>Horizon (last simulated date)<input id="fHorizon" type="date"></label>
+      <label>Period length (days per round)<input id="fStep" type="number" min="1" value="7"></label>
+      <label>Agents in the swarm<input id="fAgents" type="number" min="2" max="12" value="6"></label>
+    </div>
+    <label>Wikipedia articles (optional, comma-separated; otherwise the model picks them)<input id="fTitles" placeholder="Lehman Brothers, Henry Paulson, TARP"></label>
+    <label>Seed documents (optional — pasted notes, articles, cables; treated as of the cutoff after leakage filtering)<textarea id="fDocs" rows="4" placeholder="Paste text…"></textarea></label>
+    <p class="small muted">Historical horizon → the baseline is extracted from present-day sources and you fork counterfactuals at any event. Future horizon → a baseline forecast is launched automatically from today, and you fork interventions off it.</p>
+    <div class="row end">
+      <button class="ghost" onclick="closeModal('newScenarioModal')">Cancel</button>
+      <button class="primary" id="createScenarioBtn">Build baseline</button>
+    </div>
+  </div>
+</div>
+
+<!-- Provider modal -->
+<div class="modal" id="providerModal" hidden>
+  <div class="modalCard">
+    <h2>Model provider</h2>
+    <p class="small muted">Any OpenAI-compatible endpoint works. Keys stay in this server's memory only.</p>
+    <label>Preset<select id="pPreset"></select></label>
+    <div id="pNotes" class="small muted"></div>
+    <label>API key<input id="pKey" type="password" placeholder="leave blank to keep the current key"></label>
+    <label>Base URL<input id="pBase"></label>
+    <label>Model <button class="ghost small" id="pListModels">list models</button><input id="pModel" list="modelList"><datalist id="modelList"></datalist></label>
+    <div class="grid2">
+      <label>Concurrency<input id="pConc" type="number" min="1" max="32"></label>
+      <label>Requests / min (0 = off)<input id="pRpm" type="number" min="0"></label>
+      <label>Max rounds per branch<input id="pRounds" type="number" min="1" max="60"></label>
+    </div>
+    <div id="pResult" class="small"></div>
+    <div class="row end">
+      <button class="ghost" onclick="closeModal('providerModal')">Close</button>
+      <button class="primary" id="pSave">Save &amp; test</button>
+    </div>
+  </div>
+</div>
+
+<!-- Help modal -->
+<div class="modal" id="helpModal" hidden>
+  <div class="modalCard wide">
+    <h2>How this works</h2>
+    <ol class="help">
+      <li><b>Retrieve.</b> For your topic, the server pulls Wikipedia <em>revisions as they existed on the cutoff date</em> (so agents can't peek at the ending), GDELT news headlines up to the cutoff, present-day article text (only for the actual-history baseline) and any seed documents you paste.</li>
+      <li><b>Ground.</b> A leakage-filter pass rewrites the material into a briefing containing only what was knowable at the cutoff, and lists what it stripped.</li>
+      <li><b>Cast.</b> The model designs the actors whose decisions drive the situation — they become the agent swarm.</li>
+      <li><b>Baseline.</b> Actual events between the anchor and today are extracted onto the grey lane. If the horizon is in the future, a baseline forecast branch starts from today.</li>
+      <li><b>Fork.</b> Click an event → <em>What if…</em> → a new branch. Every period, all agents decide concurrently (with only cutoff-safe knowledge plus the branch's own history), and an arbiter "world model" adjudicates what happens, scores divergence from the parent lane, and updates each agent's memory.</li>
+      <li><b>Analyse.</b> Each finished branch gets a report (mechanism, probability, signposts, convergence). Interview any agent inside any branch, or compare two branches.</li>
+    </ol>
+    <p class="small muted">Caveat: for topics older than ~2002 Wikipedia has no pre-event revision, so the leakage filter is doing the work — check the "stripped" notes in the branch briefing. All forecasts are model output, not evidence.</p>
+    <div class="row end"><button class="primary" onclick="closeModal('helpModal')">Got it</button></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
