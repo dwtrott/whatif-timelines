@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import PRESETS, Settings, load_settings
 from .engine import Engine, EventBus
 from .llm import LLM
-from .retrieval import Retriever
+from .retrieval import Retriever, diagnose
 from .store import Store
 
 log = logging.getLogger("whatif.server")
@@ -95,6 +95,15 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
             return {"models": await engine.llm.list_models()}
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"models": [], "error": str(e)[:300]}, status_code=200)
+
+    @app.get("/api/diag")
+    async def diag():
+        out = await diagnose(engine.s)
+        out["llm"] = await engine.llm.ping()
+        out["llm"]["provider"] = engine.s.provider
+        out["llm"]["model"] = engine.s.model
+        out["ok"] = out["ok"] and out["llm"]["ok"]
+        return out
 
     @app.get("/api/examples")
     async def examples():

@@ -115,7 +115,8 @@ class Settings:
     max_chars_per_article: int = 6000
     gdelt_max_records: int = 25
     brief_chars: int = 9000      # how much of the briefing each agent sees per call (free tiers: smaller)
-    user_agent: str = "WhatIf-Timelines/0.1 (research prototype; contact: local user)"
+    # Wikimedia requires a descriptive UA with contact info, and blocks generic ones from cloud IPs (Colab!).
+    user_agent: str = "WhatIfTimelines/0.1 (https://github.com/dwtrott/whatif-timelines; research prototype) python-httpx"
     extra: dict = field(default_factory=dict)
 
     @property
@@ -193,6 +194,8 @@ def load_settings(**overrides) -> Settings:
         timeout=float(_env("LLM_TIMEOUT_SECONDS") or 120),
         data_dir=_env("WHATIF_DATA_DIR") or "data",
     )
+    if _env("WHATIF_USER_AGENT"):
+        s.user_agent = _env("WHATIF_USER_AGENT")
     for k, v in overrides.items():
         if hasattr(s, k) and v is not None:
             setattr(s, k, v)

@@ -219,6 +219,11 @@ class Engine:
             except Exception as e:  # noqa: BLE001
                 self._log(sc, f"Retrieval error: {e}", "warning")
                 docs = []
+            for err in self.retriever.errors[:6]:
+                self._log(sc, f"Retrieval: {err}", "warning")
+            if not docs:
+                self._log(sc, "Retrieval returned nothing. Run Diagnostics (provider chip → Diagnostics, or GET /api/diag) "
+                              "to see which source is failing.", "warning")
         self._doc_cache[key] = docs
         return docs
 

@@ -155,9 +155,17 @@ class LLM:
                 await asyncio.sleep(wait + random.random())
                 delay = min(delay * 2, 40)
                 continue
-            if r.status_code == 400 and "response_format" in payload and "response_format" in r.text:
-                payload.pop("response_format", None)  # provider doesn't support it; retry plain
-                continue
+            if r.status_code == 400:
+                body = r.text
+                if "response_format" in payload and "response_format" in body:
+                    payload.pop("response_format", None)  # provider doesn't support it; retry plain
+                    continue
+                if "max_tokens" in payload and "max_completion_tokens" in body:
+                    payload["max_completion_tokens"] = payload.pop("max_tokens")  # o-series / gpt-5 style models
+                    continue
+                if "temperature" in payload and "temperature" in body and "unsupported" in body.lower():
+                    payload.pop("temperature", None)
+                    continue
             if r.status_code >= 400:
                 raise LLMError(f"HTTP {r.status_code} from {self.s.base_url}: {r.text[:500]}")
 

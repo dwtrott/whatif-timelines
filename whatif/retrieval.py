@@ -52,6 +52,22 @@ class Retriever:
         self.s = settings
         self.api = f"https://{settings.wiki_lang}.wikipedia.org/w/api.php"
         self._client: httpx.AsyncClient | None = None
+        self.errors: list[str] = []      # human-readable failures from the last gather(), surfaced in the GUI
+
+    def _fmt(self, e: Exception) -> str:
+        if isinstance(e, httpx.HTTPStatusError):
+            return f"HTTP {e.response.status_code} — {e.response.text[:160]}"
+        return f"{type(e).__name__}: {e}"
+
+    def _err(self, where: str, e: Exception | str):
+        msg = str(e)
+        if isinstance(e, httpx.HTTPStatusError):
+            body = e.response.text[:160].replace("\n", " ")
+            msg = f"HTTP {e.response.status_code} — {body}"
+        line = f"{where}: {msg}"[:400]
+        log.warning(line)
+        if len(self.errors) < 20:
+            self.errors.append(line)
 
     async def client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -157,7 +173,7 @@ class Retriever:
                                         datetime.utcnow().date().isoformat(), False,
                                         "present-day article; used only for the actual-history baseline"))
                 except Exception as e:  # noqa: BLE001
-                    log.warning("wikipedia fetch failed for %r: %s", title, e)
+                    self._err(f"Wikipedia '{title}'", e)
 
         await asyncio.gather(*(one(t) for t in titles))
         return docs
@@ -180,11 +196,11 @@ class Retriever:
         try:
             r = await c.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params)
             if r.status_code != 200 or not r.text.strip().startswith("{"):
-                log.info("gdelt returned %s: %s", r.status_code, r.text[:120])
+                self._err(f"GDELT '{query}'", f"HTTP {r.status_code} — {r.text[:160].strip()}")
                 return []
             arts = r.json().get("articles", [])
         except Exception as e:  # noqa: BLE001
-            log.warning("gdelt failed: %s", e)
+            self._err(f"GDELT '{query}'", e)
             return []
         docs = []
         for a in arts:
@@ -198,13 +214,16 @@ class Retriever:
     async def gather(self, topic: str, titles: list[str], cutoff: date, extra_queries: list[str] | None = None,
                      user_docs: list[dict] | None = None, want_latest: bool = True) -> list[Doc]:
         docs: list[Doc] = []
+        self.errors = []
+        if not titles:
+            self.errors.append("Wikipedia: no article titles to fetch (title suggestion step returned none)")
         wiki_task = self.wiki_docs(titles, cutoff, want_latest=want_latest)
         queries = [topic] + [q for q in (extra_queries or []) if q and q != topic]
         gdelt_tasks = [self.gdelt(q, cutoff - timedelta(days=120), cutoff) for q in queries[:3]]
         results = await asyncio.gather(wiki_task, *gdelt_tasks, return_exceptions=True)
         for res in results:
             if isinstance(res, Exception):
-                log.warning("retrieval task failed: %s", res)
+                self._err("retrieval task", res)
                 continue
             docs.extend(res)
         for ud in user_docs or []:
@@ -212,6 +231,33 @@ class Retriever:
                 docs.append(Doc("user", ud.get("title") or "Pasted document", ud["text"][: self.s.max_chars_per_article * 2],
                                 "", cutoff.isoformat(), False, "user-supplied; leakage filter applied"))
         return docs
+
+
+async def diagnose(settings: Settings) -> dict:
+    """Probe each source with a known-good request; used by /api/diag and the notebook."""
+    r = Retriever(settings)
+    out: dict = {"user_agent": settings.user_agent}
+    try:
+        hits = await r.wiki_search("Lehman Brothers", 3)
+        out["wikipedia_search"] = {"ok": bool(hits), "detail": hits}
+    except Exception as e:  # noqa: BLE001
+        out["wikipedia_search"] = {"ok": False, "detail": r._fmt(e)}
+    try:
+        revid, ts, ok = await r.wiki_revision_asof("Lehman Brothers", date(2008, 3, 1))
+        txt = await r.wiki_revision_text(revid) if revid else ""
+        out["wikipedia_asof"] = {"ok": bool(revid and txt), "detail": f"revid={revid} ts={ts} chars={len(txt)} cutoff_ok={ok}"}
+    except Exception as e:  # noqa: BLE001
+        out["wikipedia_asof"] = {"ok": False, "detail": r._fmt(e)}
+    try:
+        txt, url = await r.wiki_latest_text("Lehman Brothers")
+        out["wikipedia_latest"] = {"ok": len(txt) > 1000, "detail": f"chars={len(txt)} url={url}"}
+    except Exception as e:  # noqa: BLE001
+        out["wikipedia_latest"] = {"ok": False, "detail": r._fmt(e)}
+    docs = await r.gdelt("federal reserve", date(2024, 1, 1), date(2024, 1, 31), 5)
+    out["gdelt"] = {"ok": bool(docs), "detail": [d.title for d in docs][:3] or (r.errors[-1] if r.errors else "no articles")}
+    await r.aclose()
+    out["ok"] = all(v.get("ok") for k, v in out.items() if isinstance(v, dict))
+    return out
 
 
 def _first_rev(data: dict) -> dict | None:

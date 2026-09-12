@@ -618,6 +618,18 @@ async function listModels() {
   } catch (e) { $('#pResult').textContent = e.message; }
 }
 
+async function runDiag() {
+  const out = $('#pResult');
+  out.innerHTML = '<span class="muted">probing Wikipedia, GDELT and the model…</span>';
+  try {
+    const d = await api('/api/diag');
+    const row = (k, v) => `<div><span style="color:${v.ok ? 'var(--ok)' : 'var(--bad)'}">${v.ok ? '✓' : '✗'}</span> <b>${esc(k)}</b> <span class="muted">${esc(typeof v.detail === 'string' ? v.detail : JSON.stringify(v.detail))}</span></div>`;
+    out.innerHTML = ['wikipedia_search', 'wikipedia_asof', 'wikipedia_latest', 'gdelt', 'llm'].filter(k => d[k]).map(k => row(k, d[k])).join('')
+      + `<div class="muted" style="margin-top:4px">user-agent: ${esc(d.user_agent)}</div>`;
+    toast('diagnostics: ' + (d.ok ? 'all sources OK' : 'some sources failing — see provider dialog'), d.ok ? 'info' : 'warning');
+  } catch (e) { out.innerHTML = `<span style="color:var(--bad)">${esc(e.message)}</span>`; }
+}
+
 // ------------------------------------------------------------------ ui bindings
 function bindUI() {
   $('#scenarioSelect').onchange = e => selectScenario(e.target.value);
@@ -626,6 +638,7 @@ function bindUI() {
   $('#providerChip').onclick = openProvider;
   $('#pSave').onclick = saveProvider;
   $('#pListModels').onclick = e => { e.preventDefault(); listModels(); };
+  $('#pDiag').onclick = runDiag;
   $('#helpBtn').onclick = () => openModal('helpModal');
   $('#consoleToggle').onclick = () => { const c = $('#console'); c.classList.toggle('collapsed'); $('#consoleToggle').textContent = c.classList.contains('collapsed') ? 'show' : 'hide'; };
   $$('.modal').forEach(m => m.addEventListener('click', e => { if (e.target === m) m.hidden = true; }));

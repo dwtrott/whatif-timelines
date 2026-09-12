@@ -95,6 +95,21 @@ code("""from whatif.server import run
 url = run(port=8000, background=True, max_rounds=MAX_ROUNDS)
 print("\\n➡  Open in a new tab:", url)""")
 
+md("""## 3b · Diagnostics — run this if a scenario comes back empty
+Probes Wikipedia (search, as-of revision, present-day text), GDELT and your model with known-good requests, and prints the server's recent log.""")
+
+code("""import requests, json
+d = requests.get("http://localhost:8000/api/diag", timeout=120).json()
+for k in ["wikipedia_search", "wikipedia_asof", "wikipedia_latest", "gdelt", "llm"]:
+    v = d.get(k, {}); print(("OK  " if v.get("ok") else "FAIL"), k, "→", v.get("detail"))
+print("user-agent:", d.get("user_agent"))
+# most recent scenario's log
+scs = requests.get("http://localhost:8000/api/scenarios").json()
+if scs:
+    sc = requests.get(f"http://localhost:8000/api/scenarios/{scs[0]['id']}").json()
+    print(f"\nScenario '{sc['title']}' status={sc['status']} error={sc['error']!r} docs={len(sc['docs'])} personas={len(sc['personas'])}")
+    for l in sc["log"][-25:]: print(f"  [{l['level']}] {l['msg']}")""")
+
 md("""## 4 · (Optional) Show the GUI inline
 The proxied page also works embedded in the notebook. A separate tab is roomier.""")
 
