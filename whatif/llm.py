@@ -373,7 +373,16 @@ def mock_response(kind: str, messages: list[dict], ctx: dict) -> str:
                 "divergence": round(rng.uniform(0.0, 1.0), 2) if ctx.get("has_parent") else 0.0,
                 "importance": rng.choice([1, 2, 3, 4, 5]),
             })
-        return _json.dumps({"events": evs,
+        extra = {}
+        if rng.random() < 0.5:
+            extra["junctures"] = [{"question": f"Does {pick(_ACTORS)[0]} prevail on {topic}?", "p_yes": round(rng.uniform(0.2, 0.8), 2),
+                                   "if_yes": {"headline": f"{pick(_ACTORS)[0].capitalize()} prevails", "summary": "mock yes"},
+                                   "if_no": {"headline": f"{pick(_ACTORS)[0].capitalize()} is rebuffed", "summary": "mock no"}, "importance": 4, "actors": pick(_ACTORS, 1)}]
+        if rng.random() < 0.25:
+            extra["new_actors"] = [{"name": f"Successor {rng.randint(1, 99)}", "role": "new minister", "why_now": "vacancy"}]
+        if rng.random() < 0.15:
+            extra["exits"] = [ctx.get("name", "")]
+        return _json.dumps({"events": evs, **extra,
                             "world_state": f"As of {date}: tension {rng.choice(['rising', 'plateauing', 'easing'])}; "
                                            f"the premise ({premise}) continues to shape incentives.",
                             "indicators": {"tension": round(rng.uniform(0.2, 0.95), 2),
@@ -397,6 +406,23 @@ def mock_response(kind: str, messages: list[dict], ctx: dict) -> str:
                             "points": [{"dimension": "Pace", "a": "gradual", "b": "abrupt"},
                                        {"dimension": "Winner", "a": pick(_ACTORS)[0], "b": pick(_ACTORS)[0]},
                                        {"dimension": "End state", "a": "fragile stability", "b": "open crisis"}]})
+    if kind == "causal_map":
+        ids, dates = ctx.get("ids", []), ctx.get("dates", [])
+        cm = []
+        for i, (eid, d) in enumerate(zip(ids, dates)):
+            v = ["independent", "contingent", "dependent"][i % 3]
+            cm.append({"event_id": eid, "date": d, "verdict": v, "p": {"independent": 0.9, "contingent": 0.5, "dependent": 0.1}[v],
+                       "rationale": "mock rationale", "interceptable_by": ["the government"] if v != "dependent" else []})
+        return _json.dumps({"causal_map": cm, "structural": [{"date": dates[-1] if dates else "2100-01-01", "event": "Scheduled election", "kind": "election", "actor": "", "note": "must be resolved"}],
+                            "notes": "mock uncertainty note"})
+    if kind == "new_actor":
+        return _json.dumps({"name": ctx.get("name", "New Actor"), "role": "successor", "goals": "consolidate", "stance": "cautious", "style": "terse",
+                            "resources": "office", "background": "mock", "playbook": "wait, then strike", "relationships": "rival of incumbent", "red_lines": "humiliation"})
+    if kind == "aggregate":
+        n = ctx.get("n", 1)
+        return _json.dumps({"outcome_questions": ["Did the crisis escalate?"], "per_run": [{"run": f"run {i+1}", "answers": {"Did the crisis escalate?": "yes" if i % 2 == 0 else "no"}, "one_line": "mock"} for i in range(n)],
+                            "frequencies": {"Did the crisis escalate?": {"yes": (n + 1) // 2, "no": n // 2, "partial": 0}},
+                            "summary": "Mock aggregate summary.", "decisive_junctures": ["the election roll"]})
     if kind == "research_plan":
         return _json.dumps({"is_individual": True, "wikipedia_titles": [ctx.get("name", "")], "queries": [], "own_domains": []})
     if kind == "evidence":

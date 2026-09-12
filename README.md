@@ -28,10 +28,16 @@ in **Google Colab** on `localhost`, with **any OpenAI-compatible model** — an 
    behaviour at ~85% normalized accuracy; agents built from short persona paragraphs do markedly worse.)
 4. **Baseline.** Real events between your anchor date and today are extracted onto the grey *Actual history* lane.
    If the horizon is in the future, a *Baseline forecast* lane starts automatically from today.
-5. **Fork.** Click any event → *What if…* → new lane. Every period all agents decide **concurrently** (observe →
-   private reasoning → action → public statement), then an **arbiter / world model** adjudicates what actually
-   happens, scores each event's **divergence from the parent lane** in the same window, updates indicators
-   (tension, public support, economic stress) and each agent's memory. Branches can be forked from branches.
+5. **Fork.** Click any event → *What if…* → new lane. Before the first round the engine builds a **causal map**: every
+   real event after the fork on the parent lane is classified *independent* (still happens unless a named actor
+   intercepts it), *dependent* (falls away with the premise) or *contingent* (probability p), plus a **structural
+   calendar** — elections, term limits, scheduled events, actor lifecycles — knowable at the cutoff. Then every period
+   all agents decide **concurrently**, and an **arbiter / world model** (blind to the analyst's question) adjudicates:
+   it must resolve the exogenous and structural events due that period, state **junctures** with explicit
+   probabilities and both outcomes — **the engine rolls seeded dice**, the model does not get to choose — bring in
+   **new actors** and retire departing ones, score **divergence** from the parent lane, and update indicators and
+   memories. Fork ×N for a **Monte Carlo** group: the runs differ by seed and an aggregate codes the outcome question
+   across them ("attack on US soil by end-2001: 6/8 runs"). Branches can be forked from branches.
 6. **Analyse.** Each finished lane gets a report: narrative, mechanism, probability estimate, key divergences,
    signposts, the assumptions it rests on, whether it converges back to the parent. **Interview** any agent inside any
    lane; **compare** two lanes.
@@ -83,7 +89,8 @@ Knobs: max rounds (per fork or globally), agents per scenario, `WHATIF_CONCURREN
 |---|---|
 | `POST /api/scenarios` | `{title, question, anchor_date, horizon_date, step_days, n_agents, wiki_titles?, user_docs?}` |
 | `GET /api/scenarios/{id}` | full state: personas, docs, branches, events, reports, log |
-| `POST /api/scenarios/{id}/fork` | `{parent_branch_id, fork_event_id?, fork_date?, premise, name?, max_rounds?, step_days?}` |
+| `POST /api/scenarios/{id}/fork` | `{parent_branch_id, fork_event_id?, fork_date?, premise, name?, max_rounds?, step_days?, notes?, runs?, seed?}` |
+| `GET …/aggregate?group=` | Monte-Carlo aggregate for a run group |
 | `POST …/branches/{bid}/stop`, `DELETE …/branches/{bid}` | |
 | `PATCH …/personas/{pid}` (or `/personas/new`), `DELETE …/personas/{pid}`, `POST …/recast` `{notes}` | edit the cast |
 | `POST …/research` `{persona_ids?, depth?}` | build dossiers (all missing, or the given actors) |

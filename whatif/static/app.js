@@ -262,10 +262,13 @@ function renderTimeline() {
         const op = e.kind === 'actual' || e.kind === 'premise' ? 1 : 0.45 + (e.confidence ?? .6) * .55;
         const sel = state.sel?.type === 'event' && state.sel.id === e.id ? 'selected' : '';
         const fill = e.kind === 'actual' ? '#e5e7eb' : b.color;
+        const core = e.kind === 'juncture' ? `<rect class="core" x="${-r}" y="${-r}" width="${2 * r}" height="${2 * r}" transform="rotate(45)" fill="${fill}" fill-opacity="${op}"/>`
+          : e.kind === 'exogenous' ? `<rect class="core" x="${-r}" y="${-r}" width="${2 * r}" height="${2 * r}" rx="2" fill="#94a3b8" fill-opacity="${op}" stroke="${b.color}"/>`
+          : `<circle class="core" r="${r}" fill="${fill}" fill-opacity="${op}"/>`;
         g += `<g class="ev ${e.kind} ${sel}" data-id="${e.id}" data-b="${b.id}" transform="translate(${X(e.date)},${y + off})">
           <circle class="halo" r="${r + 6}"/>
           ${e.divergence > 0.05 ? `<circle class="ring" r="${r + 3.5}" stroke-opacity="${e.divergence}" stroke-width="${1 + e.divergence * 2}"/>` : ''}
-          <circle class="core" r="${r}" fill="${fill}" fill-opacity="${op}"/>
+          ${core}
         </g>`;
       });
     });
@@ -385,9 +388,11 @@ function renderEventDetail(box) {
       <label>Analyst notes for this branch (optional — priors about how specific actors will behave)<textarea id="forkNotes" rows="2" placeholder="e.g. Altman will not go quietly: expect him to take staff and funders with him within days."></textarea></label>
       <div class="grid2">
         <label>Branch name (optional)<input id="forkName"></label>
-        <label>Max rounds<input id="forkRounds" type="number" min="1" max="60" value="${state.config?.max_rounds || 12}"></label>
+        <label>Rounds <span id="forkRoundsHint" class="muted"></span><input id="forkRounds" type="number" min="1" max="60" value="${suggestRounds(sc, e.date)}" oninput="updateRoundsHint('${e.date}')"></label>
+        <label>Independent runs (Monte Carlo)<select id="forkRuns"><option value="1">1 — single story</option><option value="3">3</option><option value="5">5</option><option value="8">8</option></select></label>
+        <label>Seed (optional, for reproducibility)<input id="forkSeed" type="number" placeholder="random"></label>
       </div>
-      <div class="row end"><span class="muted small">${estimateCalls(sc, e.date)} LLM calls</span><button class="primary" onclick="doFork('${b.id}','${e.id}')">⑂ Fork timeline</button></div>
+      <div class="row end"><span class="muted small" id="forkCost">${estimateCalls(sc, e.date)} LLM calls</span><button class="primary" onclick="doFork('${b.id}','${e.id}')">⑂ Fork timeline</button></div>
     </div>` : ''}
     ${acts.length ? `<div class="dsec"><h4>What the swarm did this period</h4>${acts.map(a => `<div class="agentAct">
         <div class="who">${esc(a.name)} <span>· ${esc(a.role)}</span></div>
@@ -397,6 +402,7 @@ function renderEventDetail(box) {
       </div>`).join('')}</div>` : ''}
     ${e.sources?.length ? `<div class="dsec"><h4>Sources</h4>${e.sources.map(s => `<div class="small">${esc(s)}</div>`).join('')}</div>` : ''}
   `;
+  if (canFork) updateRoundsHint(e.date);
 }
 
 function examplePremise(sc, e) {
@@ -404,6 +410,20 @@ function examplePremise(sc, e) {
   return `${a} does the opposite: ${e.headline.toLowerCase()} never happens`;
 }
 
+function suggestRounds(sc, fromDate) {
+  const days = daysBetween(fromDate, sc.horizon_date), cap = state.config?.max_rounds || 12;
+  const natural = Math.max(1, Math.ceil(days / sc.step_days));
+  if (days > 365 * 3) return Math.max(cap, 24);
+  if (days > 365) return Math.max(cap, 16);
+  return Math.min(cap, natural);
+}
+function updateRoundsHint(fromDate) {
+  const r = parseInt($('#forkRounds')?.value || '0', 10) || 1;
+  const days = daysBetween(fromDate, state.sc.horizon_date);
+  const per = Math.ceil(days / r);
+  const h = $('#forkRoundsHint'); if (h) h.textContent = `≈ ${per >= 365 ? (per / 365).toFixed(1) + ' years' : per >= 60 ? Math.round(per / 30) + ' months' : per + ' days'} per round${per > 180 ? ' ⚠ coarse' : ''}`;
+  const c = $('#forkCost'); if (c) c.textContent = `${estimateCalls(state.sc, fromDate, r)} LLM calls per run`;
+}
 function estimateCalls(sc, fromDate, rounds) {
   const cap = rounds || state.config?.max_rounds || 12;
   const days = daysBetween(fromDate, sc.horizon_date);
@@ -416,8 +436,11 @@ async function doFork(parentId, eventId, dateOverride) {
   const name = $('#forkName')?.value.trim() || '';
   const rounds = parseInt($('#forkRounds')?.value || '0', 10) || undefined;
   const notes = $('#forkNotes')?.value.trim() || '';
+  const runs = parseInt($('#forkRuns')?.value || '1', 10) || 1;
+  const seed = $('#forkSeed')?.value || '';
+  if (runs > 1 && !confirm(`Launch ${runs} independent runs? ≈${runs} × ${estimateCalls(state.sc, dateOverride || findEvent(eventId, parentId)?.date || state.sc.anchor_date, rounds).replace('≈', '')} LLM calls.`)) return;
   try {
-    const res = await api(`/api/scenarios/${state.sc.id}/fork`, 'POST', {parent_branch_id: parentId, fork_event_id: eventId, premise, name, max_rounds: rounds, fork_date: dateOverride, notes});
+    const res = await api(`/api/scenarios/${state.sc.id}/fork`, 'POST', {parent_branch_id: parentId, fork_event_id: eventId, premise, name, max_rounds: rounds, fork_date: dateOverride, notes, runs, seed});
     state.sc = res.scenario;
     selectBranch(res.branch_id);
     schedulePoll();
@@ -435,7 +458,8 @@ function forkAtDate(bid) {
       <label>Fork date (${minD} … ${state.sc.horizon_date})<input id="forkDate" type="date" min="${minD}" max="${state.sc.horizon_date}" value="${lastEv ? lastEv.date : minD}"></label>
       <label>What if…<textarea id="forkPremise" placeholder="Counterfactual premise that becomes true on that date (leave empty for a plain forecast)"></textarea></label>
       <label>Analyst notes for this branch (optional)<textarea id="forkNotes" rows="2"></textarea></label>
-      <div class="grid2"><label>Branch name<input id="forkName"></label><label>Max rounds<input id="forkRounds" type="number" min="1" max="60" value="${state.config?.max_rounds || 12}"></label></div>
+      <div class="grid2"><label>Branch name<input id="forkName"></label><label>Rounds <span id="forkRoundsHint" class="muted"></span><input id="forkRounds" type="number" min="1" max="60" value="${suggestRounds(state.sc, lastEv ? lastEv.date : minD)}"></label>
+        <label>Independent runs<select id="forkRuns"><option value="1">1</option><option value="3">3</option><option value="5">5</option><option value="8">8</option></select></label><label>Seed<input id="forkSeed" type="number" placeholder="random"></label></div>
       <div class="row end"><button class="primary" onclick="doFork('${b.id}', null, $('#forkDate').value)">⑂ Fork timeline</button></div>
     </div>`;
 }
@@ -466,24 +490,48 @@ function renderBranchDetail(box) {
       </div>
     </div>
     ${r.summary ? `<div class="dsec"><h4>Report</h4><div class="md"><p><b>${esc(r.summary)}</b></p>${md(r.narrative || '')}</div>
+        ${r.answer_to_question ? `<p><b>Answer (this run):</b> ${esc(r.answer_to_question)}</p>` : ''}
+        ${r.dice_sensitivity ? `<p class="small"><b>Dice sensitivity:</b> ${esc(r.dice_sensitivity)}</p>` : ''}
         ${r.what_changed ? `<p class="small"><b>Mechanism:</b> ${esc(r.what_changed)}</p>` : ''}
         ${(r.key_divergences || []).length ? `<h4 style="margin-top:10px">Key divergences</h4><ul class="md">${r.key_divergences.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
         ${(r.assumptions || []).length ? `<h4 style="margin-top:10px">Rests on these assumptions</h4><ul class="md">${r.assumptions.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
         ${(r.signposts || []).length ? `<h4 style="margin-top:10px">Signposts</h4><ul class="md">${r.signposts.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
         ${r.convergence_note ? `<p class="small muted">${esc(r.convergence_note)}</p>` : ''}
       </div>` : ''}
+    ${b.report?.aggregate ? aggregateHTML(b.report.aggregate) : (b.run_group ? `<div class="dsec small muted">Part of a ${Object.values(sc.branches).filter(x => x.run_group === b.run_group).length}-run Monte Carlo group — the aggregate appears here when all runs finish. <button class="ghost small" onclick="runAggregate('${b.run_group}')">aggregate now</button></div>` : '')}
+    ${b.junctures?.length ? `<div class="dsec"><h4>Junctures rolled (${b.junctures.length})</h4>${b.junctures.map(j => `<div class="agentAct"><div class="who"><span class="mono muted">${j.date}</span> ${esc(j.question)}</div><div><span class="tag">p(yes) ${j.p_yes}</span> <span class="tag">rolled ${j.roll}</span> → <b style="color:${j.outcome === 'yes' ? 'var(--ok)' : 'var(--warn)'}">${j.outcome.toUpperCase()}</b> · ${esc(j.headline)}</div></div>`).join('')}</div>` : ''}
+    ${b.causal_map?.length ? `<div class="dsec"><h4>Causal map of real post-fork events</h4><div class="small muted" style="margin-bottom:6px">${esc(b.world_notes || '')}</div>${b.causal_map.map(c => `<div class="small" style="margin:4px 0"><span class="mono muted">${c.date}</span> <span class="tag" style="color:${c.verdict === 'independent' ? 'var(--ok)' : c.verdict === 'dependent' ? 'var(--bad)' : 'var(--warn)'}">${c.verdict}${c.verdict !== 'dependent' ? ' p=' + Number(c.p).toFixed(2) : ''}</span> ${esc(c.headline)}<div class="muted" style="margin-left:8px">${esc(c.rationale)}${c.interceptable_by?.length ? ' · interceptable by ' + esc(c.interceptable_by.join(', ')) : ''}${c.resolved ? ' · resolved' : ''}</div></div>`).join('')}</div>` : ''}
+    ${b.structural?.length ? `<div class="dsec"><details><summary class="muted small">Structural calendar (${b.structural.length})</summary>${b.structural.map(x => `<div class="small" style="margin:3px 0"><span class="mono muted">${x.date}</span> <span class="tag">${esc(x.kind)}</span> ${esc(x.event)}${x.actor ? ' · ' + esc(x.actor) : ''} <span class="muted">${esc(x.note)}</span></div>`).join('')}</details></div>` : ''}
+    ${(b.extra_personas?.length || b.retired?.length) ? `<div class="dsec"><h4>Cast changes</h4>${(b.extra_personas || []).map(p => `<div class="small">＋ <b>${esc(p.name)}</b> — ${esc(p.role)}</div>`).join('')}${(b.retired || []).map(n => `<div class="small muted">− ${esc(n)} left the stage</div>`).join('')}</div>` : ''}
     ${b.indicators?.length > 1 ? `<div class="dsec"><h4>Indicators</h4>${sparkSVG(b.indicators)}<div class="small muted"><span style="color:var(--bad)">■</span> tension <span style="color:var(--ok)">■</span> public support <span style="color:var(--warn)">■</span> economic stress</div></div>` : ''}
     ${b.world_state ? `<div class="dsec"><h4>World state at end</h4><div class="small">${esc(b.world_state)}</div></div>` : ''}
     <div class="dsec"><h4>Timeline (${b.events.length})</h4>${b.events.slice().sort((x, y) => x.date.localeCompare(y.date)).map(e => `<div class="small" style="margin:3px 0;cursor:pointer" onclick="selectEvent('${e.id}','${b.id}')"><span class="mono muted">${e.date}</span> ${esc(e.headline)}${e.divergence > .5 ? ' <span style="color:var(--bad)">◆</span>' : ''}</div>`).join('')}</div>
     ${b.events.length > 1 && sc.personas.length ? `<div class="dsec"><h4>Interview an agent on this branch</h4>
       <div class="chat" id="chatBox">${chat.map(c => `<div class="q">You → ${esc(c.who)}: ${esc(c.q)}</div><div class="a">${esc(c.a)}</div>`).join('')}</div>
-      <div class="row"><select id="ivWho" style="width:45%">${sc.personas.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select><input id="ivQ" placeholder="Ask…" style="flex:1" onkeydown="if(event.key==='Enter')doInterview('${b.id}')"><button onclick="doInterview('${b.id}')">ask</button></div>
+      <div class="row"><select id="ivWho" style="width:45%">${[...sc.personas, ...(b.extra_personas || [])].map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select><input id="ivQ" placeholder="Ask…" style="flex:1" onkeydown="if(event.key==='Enter')doInterview('${b.id}')"><button onclick="doInterview('${b.id}')">ask</button></div>
     </div>` : ''}
     ${others.length ? `<div class="dsec"><h4>Compare with…</h4><div class="row"><select id="cmpWith" style="flex:1">${others.map(o => `<option value="${o.id}">${esc(o.name)}</option>`).join('')}</select><button onclick="doCompare('${b.id}')">compare</button></div><div id="cmpOut" class="md"></div></div>` : ''}
     ${b.briefing ? `<div class="dsec"><details><summary class="muted small">Briefing the agents received (cutoff ${b.knowledge_cutoff})</summary>
         ${(b.briefing_flags || []).map(f => `<div class="flag">⚠ ${esc(f)}</div>`).join('')}
         <div class="md small">${md(b.briefing)}</div></details></div>` : ''}
   `;
+}
+
+function aggregateHTML(a) {
+  const qs = a.outcome_questions || Object.keys(a.frequencies || {});
+  return `<div class="dsec"><h4>Monte Carlo · ${a.n_runs} runs</h4>
+    ${qs.map(q => { const f = (a.frequencies || {})[q] || {}; const n = (f.yes || 0) + (f.no || 0) + (f.partial || 0) || a.n_runs;
+      return `<div style="margin:6px 0"><div class="small">${esc(q)}</div><div class="meter" style="height:10px;display:flex"><i style="width:${100 * (f.yes || 0) / n}%;background:var(--ok)" title="yes ${f.yes || 0}"></i><i style="width:${100 * (f.partial || 0) / n}%;background:var(--warn)" title="partial ${f.partial || 0}"></i><i style="width:${100 * (f.no || 0) / n}%;background:var(--bad)" title="no ${f.no || 0}"></i></div><div class="small muted">yes ${f.yes || 0} · partial ${f.partial || 0} · no ${f.no || 0}</div></div>`; }).join('')}
+    <div class="md">${md(a.summary || '')}</div>
+    ${(a.decisive_junctures || []).length ? `<h4 style="margin-top:8px">Decisive junctures</h4><ul class="md">${a.decisive_junctures.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+    ${(a.per_run || []).length ? `<details><summary class="muted small">per run</summary>${a.per_run.map(r => `<div class="small" style="margin:3px 0"><b>${esc(r.run)}</b> — ${esc(r.one_line)} <span class="muted">${esc(Object.entries(r.answers || {}).map(([k, v]) => v).join(' / '))}</span></div>`).join('')}</details>` : ''}
+  </div>`;
+}
+
+async function runAggregate(group) {
+  toast('aggregating runs…');
+  try { await api(`/api/scenarios/${state.sc.id}/aggregate?group=${group}`); await refreshScenario(); }
+  catch (e) { alert(e.message); }
 }
 
 function sparkSVG(ind) {
@@ -514,7 +562,7 @@ function md(s) {
 async function doInterview(bid) {
   const who = $('#ivWho').value, q = $('#ivQ').value.trim();
   if (!q) return;
-  const p = state.sc.personas.find(x => x.id === who);
+  const p = [...state.sc.personas, ...(state.sc.branches[bid]?.extra_personas || [])].find(x => x.id === who);
   const chat = (state.chat[bid] ||= []);
   chat.push({who: p.name, q, a: '…'});
   renderDetail();

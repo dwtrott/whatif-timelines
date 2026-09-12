@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import random
 import traceback
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -390,7 +391,7 @@ class Engine:
     # ------------------------------------------------------------------ branches
     def fork(self, sid: str, parent_id: str, fork_event_id: str | None, premise: str, name: str = "",
              fork_date: str | None = None, step_days: int | None = None, max_rounds: int | None = None,
-             notes: str = "") -> Branch:
+             notes: str = "", runs: int = 1, seed: int | None = None) -> Branch:
         sc = self.store.get(sid)
         if not sc:
             raise KeyError("scenario not found")
@@ -404,28 +405,36 @@ class Engine:
         if fdate < (parent.fork_date or sc.anchor_date):
             raise ValueError(f"fork date must be on or after the parent lane's start ({parent.fork_date or sc.anchor_date})")
         premise = (premise or "").strip()
-        kind = "forecast"
-        name = name.strip() or (premise[:60] + ("…" if len(premise) > 60 else "") if premise else "Forecast")
-        idx = len(sc.branches) % len(BRANCH_COLORS)
+        base_name = name.strip() or (premise[:60] + ("…" if len(premise) > 60 else "") if premise else "Forecast")
         days = (date.fromisoformat(sc.horizon_date) - date.fromisoformat(fdate)).days
-        cap = max_rounds or self.max_rounds
         step = step_days or sc.step_days
+        # default round budget grows with the horizon so long spans are not cartoons (cap still applies)
+        cap = max_rounds or suggested_rounds(days, step, self.max_rounds)
         rounds = max(1, math.ceil(days / step))
         if rounds > cap:
             rounds = cap
             step = max(1, math.ceil(days / cap))
-        br = Branch(id=new_id("br"), scenario_id=sc.id, name=name, kind=kind, premise=premise,
-                    parent_branch_id=parent.id, fork_event_id=ev.id if ev else None, fork_date=fdate,
-                    knowledge_cutoff=fdate, notes=(notes or "").strip(), color=BRANCH_COLORS[idx], status="pending", total_rounds=rounds,
-                    step_days=step, created_at=datetime.utcnow().isoformat(timespec="seconds"), depth=parent.depth + 1)
-        br.events.append(Event(id=new_id("ev"), branch_id=br.id, date=fdate,
-                               headline=("What if: " + premise[:110]) if premise else "Forecast begins",
-                               summary=premise or "Agents forecast forward with no counterfactual change.",
-                               kind="premise", importance=5, round=-1))
-        sc.branches[br.id] = br
+        runs = max(1, min(8, int(runs or 1)))
+        group = new_id("run") if runs > 1 else ""
+        first: Branch | None = None
+        for i in range(runs):
+            idx = len(sc.branches) % len(BRANCH_COLORS)
+            br = Branch(id=new_id("br"), scenario_id=sc.id, name=base_name + (f" #{i + 1}" if runs > 1 else ""), kind="forecast",
+                        premise=premise, parent_branch_id=parent.id, fork_event_id=ev.id if ev else None, fork_date=fdate,
+                        knowledge_cutoff=fdate, notes=(notes or "").strip(), color=BRANCH_COLORS[idx], status="pending",
+                        total_rounds=rounds, step_days=step, created_at=datetime.utcnow().isoformat(timespec="seconds"),
+                        depth=parent.depth + 1, seed=(seed if seed is not None else random.randrange(1, 10**9)) + i,
+                        run_group=group)
+            br.events.append(Event(id=new_id("ev"), branch_id=br.id, date=fdate,
+                                   headline=("What if: " + premise[:110]) if premise else "Forecast begins",
+                                   summary=premise or "Agents forecast forward with no counterfactual change.",
+                                   kind="premise", importance=5, round=-1))
+            sc.branches[br.id] = br
+            first = first or br
         self.store.save(sc)
-        self.tasks[br.id] = asyncio.create_task(self._run_branch(sc.id, br.id), name=f"branch:{br.id}")
-        return br
+        for b in [x for x in sc.branches.values() if (x.run_group == group and group) or x is first]:
+            self.tasks[b.id] = asyncio.create_task(self._run_branch(sc.id, b.id), name=f"branch:{b.id}")
+        return first
 
     def stop(self, branch_id: str) -> bool:
         t = self.tasks.get(branch_id)
@@ -454,12 +463,62 @@ class Engine:
         out.sort(key=lambda e: (e.date, e.round))
         return out
 
+    async def _world_setup(self, sc: Scenario, br: Branch, parent: Branch | None):
+        """Causal-dependence map of the parent's post-fork events + structural calendar + lifecycle constraints."""
+        future = [e for e in self.lineage_events(sc, parent)] if parent else []
+        future = [e for e in future if e.date > br.fork_date and e.kind != "premise"]
+        cast = self._cast_names(sc, br)
+        ev_txt = "\n".join(f"- id={e.id} {e.date} [{e.kind}] {e.headline} — {e.summary[:220]}" for e in future[:60]) or "(none recorded)"
+        out = await self.llm.json(P.fill(P.CAUSAL_MAP_SYS, fork_date=br.fork_date, horizon=sc.horizon_date),
+                                  P.fill(P.CAUSAL_MAP_USER, title=sc.title, fork_date=br.fork_date, horizon=sc.horizon_date,
+                                         premise=br.premise or "(no counterfactual change — plain forecast)",
+                                         cast=", ".join(cast), events=ev_txt),
+                                  kind="causal_map", ctx={"seed": br.id, "dates": [e.date for e in future[:8]],
+                                                          "ids": [e.id for e in future[:8]]},
+                                  strong=True, max_tokens=3600, temperature=0.2)
+        by_id = {e.id: e for e in future}
+        cmap = []
+        for c in out.get("causal_map", []) or []:
+            if not isinstance(c, dict):
+                continue
+            e = by_id.get(str(c.get("event_id", "")))
+            d = e.date if e else _safe_date(c.get("date"), br.fork_date, sc.horizon_date)
+            if not d:
+                continue
+            verdict = str(c.get("verdict", "contingent")).lower()
+            if verdict not in ("independent", "dependent", "contingent"):
+                verdict = "contingent"
+            cmap.append({"event_id": e.id if e else "", "date": d, "headline": (e.headline if e else str(c.get("headline", "")))[:140],
+                         "summary": e.summary[:300] if e else "", "verdict": verdict,
+                         "p": _float(c.get("p"), {"independent": 0.9, "dependent": 0.1, "contingent": 0.5}[verdict]),
+                         "rationale": str(c.get("rationale", ""))[:300], "interceptable_by": _strlist(c.get("interceptable_by")),
+                         "resolved": False, "outcome": ""})
+        br.causal_map = sorted(cmap, key=lambda c: c["date"])
+        structural = []
+        for x in out.get("structural", []) or []:
+            if isinstance(x, dict) and x.get("event"):
+                d = _safe_date(x.get("date"), br.fork_date, sc.horizon_date)
+                structural.append({"date": d or sc.horizon_date, "event": str(x["event"])[:200], "kind": str(x.get("kind", ""))[:20],
+                                   "actor": str(x.get("actor", ""))[:80], "note": str(x.get("note", ""))[:200], "resolved": False})
+        br.structural = sorted(structural, key=lambda x: x["date"])
+        br.world_notes = str(out.get("notes", ""))[:600]
+        n = {k: sum(1 for c in br.causal_map if c["verdict"] == k) for k in ("independent", "dependent", "contingent")}
+        self._log(sc, f"[{br.name}] Causal map: {n['independent']} independent, {n['contingent']} contingent, "
+                      f"{n['dependent']} dependent real events; {len(br.structural)} structural events.", branch_id=br.id)
+
+    def _cast_names(self, sc: Scenario, br: Branch) -> list[str]:
+        return [p.name for p in sc.personas + br.extra_personas if p.name not in br.retired]
+
+    def _active_personas(self, sc: Scenario, br: Branch) -> list[Persona]:
+        return [p for p in sc.personas + br.extra_personas if p.name not in br.retired]
+
     async def _run_branch(self, sid: str, bid: str):
         sc = self.store.get(sid)
         br = sc.branches.get(bid) if sc else None
         if not sc or not br:
             return
         parent = sc.branches.get(br.parent_branch_id) if br.parent_branch_id else None
+        rng = random.Random(br.seed or 1)
         try:
             br.status = "retrieving"
             self.store.save(sc)
@@ -470,10 +529,11 @@ class Engine:
                           f"{br.knowledge_cutoff}" + (f" (incl. {n_ev} event article{'s' if n_ev != 1 else ''})" if n_ev else ""),
                       branch_id=br.id)
             if not docs:
-                # fall back to whatever the scenario has (as-of docs from the persona cutoff)
                 docs = [Doc(**d) for d in sc.docs if d.get("source") in ("wikipedia_asof", "user", "gdelt")]
             self._log(sc, f"[{br.name}] Grounding briefing (cutoff {br.knowledge_cutoff})…", branch_id=br.id)
             br.briefing, br.briefing_flags = await self._ground(sc, docs, br.knowledge_cutoff, br.premise)
+            self._log(sc, f"[{br.name}] Mapping causal dependence of later real events + structural calendar…", branch_id=br.id)
+            await self._world_setup(sc, br, parent)
             br.status = "running"
             self.store.save(sc)
             self.bus.publish({"type": "branch_status", "scenario_id": sc.id, "branch_id": br.id, "status": br.status})
@@ -481,11 +541,28 @@ class Engine:
             dates = sc.dates_for(br.fork_date, br.total_rounds, br.step_days)
             dates[-1] = min(dates[-1], sc.horizon_date)
             prev = br.fork_date
-            personas = sc.personas
+            past_actions: dict[str, list[str]] = {}
             for r, d in enumerate(dates):
+                personas = self._active_personas(sc, br)
                 visible = self.lineage_events(sc, br)
                 timeline_txt = P.format_timeline(visible)
-                # --- swarm: every agent decides concurrently
+                elapsed = _elapsed(br.fork_date, d)
+                # --- exogenous pressures due this period
+                due_c = [c for c in br.causal_map if prev < c["date"] <= d and not c["resolved"] and c["verdict"] != "dependent"]
+                due_s = [x for x in br.structural if prev < x["date"] <= d and not x["resolved"]]
+                exo_lines = []
+                for c in due_c:
+                    tag = "INDEPENDENT — occurs unless a named actor has intercepted/altered it" if c["verdict"] == "independent" \
+                        else f"CONTINGENT — p≈{c['p']:.2f} that it still occurs; make it a JUNCTURE"
+                    exo_lines.append(f"- {c['date']}: {c['headline']} — {c['summary'][:160]} [{tag}; interceptable by: {', '.join(c['interceptable_by']) or 'none'}]")
+                for x in due_s:
+                    exo_lines.append(f"- {x['date']}: {x['event']} [STRUCTURAL/{x['kind']}{(' · ' + x['actor']) if x['actor'] else ''}] {x['note']}")
+                exogenous_block = ("EXOGENOUS & STRUCTURAL EVENTS DUE THIS PERIOD (resolve every one):\n" + "\n".join(exo_lines) + "\n") if exo_lines else ""
+                agent_exo = ""
+                if due_s:
+                    agent_exo = "SCHEDULED THIS PERIOD (public knowledge): " + "; ".join(f"{x['date']} {x['event']}" for x in due_s)[:500] + "\n"
+
+                # --- swarm: every active agent decides concurrently
                 async def step(p: Persona):
                     out = await self.llm.json(
                         P.fill(P.AGENT_SYS, name=p.name, role=p.role, date=d, cutoff=br.knowledge_cutoff, goals=p.goals,
@@ -496,7 +573,9 @@ class Engine:
                                             notes_block=P.notes_block(sc.notes, br.notes) + _dossier_block(p),
                                             cutoff=br.knowledge_cutoff, briefing=br.briefing[:self.s.brief_chars],
                                             timeline=timeline_txt, memory=br.agent_memory.get(p.name, "(none)"),
-                                            world_state=br.world_state or "(start of simulation)", date=d),
+                                            world_state=br.world_state or "(start of simulation)", date=d,
+                                            exogenous_block=agent_exo, elapsed=elapsed,
+                                            past_actions="\n".join(f"- {a}" for a in past_actions.get(p.name, [])[-4:]) or "(none yet)"),
                         kind="agent_step", ctx={"name": p.name, "date": d, "premise": br.premise, "topic": sc.title,
                                                 "seed": br.id}, max_tokens=900)
                     return {"persona_id": p.id, "name": p.name, "role": p.role,
@@ -513,10 +592,11 @@ class Engine:
                                         "action": f"{p.name} is silent this period.", "statement": "", "predicted_next": ""})
                     else:
                         actions.append(res)
+                        past_actions.setdefault(p.name, []).append(f"{d}: {res['action']}")
                 self.bus.publish({"type": "agent_actions", "scenario_id": sc.id, "branch_id": br.id, "date": d,
                                   "actions": [{"name": a["name"], "action": a["action"]} for a in actions]})
 
-                # --- arbiter
+                # --- arbiter / world model
                 parent_block = ""
                 if parent:
                     pev = [e for e in self.lineage_events(sc, parent) if prev < e.date <= d]
@@ -529,25 +609,50 @@ class Engine:
                     P.fill(P.ARBITER_USER, premise_block=P.premise_block(br.premise, br.fork_date),
                                           notes_block=P.notes_block(sc.notes, br.notes), cutoff=br.knowledge_cutoff,
                                           briefing_short=br.briefing[:self.s.brief_chars // 2], timeline=timeline_txt,
-                                          parent_block=parent_block, actions=actions_txt, date=d),
+                                          elapsed=elapsed, exogenous_block=exogenous_block, parent_block=parent_block,
+                                          cast=", ".join(p.name for p in personas), actions=actions_txt, date=d, prev=prev),
                     kind="arbiter", ctx={"date": d, "premise": br.premise, "topic": sc.title, "seed": br.id + d,
-                                         "has_parent": bool(parent)}, max_tokens=1800, strong=True)
+                                         "has_parent": bool(parent)}, max_tokens=2600, strong=True)
                 new_events = []
-                for e in (out.get("events") or [])[:3]:
+                for e in (out.get("events") or [])[:4]:
                     if not isinstance(e, dict):
                         continue
                     ed = _safe_date(e.get("date"), prev, d) or d
                     new_events.append(Event(
                         id=new_id("ev"), branch_id=br.id, date=ed, headline=str(e.get("headline", ""))[:140],
                         summary=str(e.get("summary", "")), actors=_strlist(e.get("actors")),
-                        category=str(e.get("category", "")), kind="simulated",
+                        category=str(e.get("category", "")), kind="exogenous" if e.get("exogenous") else "simulated",
                         confidence=_float(e.get("confidence"), 0.6), divergence=_float(e.get("divergence"), 0.0),
                         importance=_int(e.get("importance"), 3), round=r, agent_actions=actions))
+                # --- junctures: the dice decide
+                for j in (out.get("junctures") or [])[:3]:
+                    if not isinstance(j, dict) or not j.get("question"):
+                        continue
+                    p_yes = _float(j.get("p_yes"), 0.5)
+                    roll = rng.random()
+                    yes = roll < p_yes
+                    branch = j.get("if_yes") if yes else j.get("if_no")
+                    branch = branch if isinstance(branch, dict) else {}
+                    rec = {"date": d, "question": str(j["question"])[:200], "p_yes": round(p_yes, 2), "roll": round(roll, 3),
+                           "outcome": "yes" if yes else "no", "headline": str(branch.get("headline", ""))[:140], "round": r}
+                    br.junctures.append(rec)
+                    new_events.append(Event(
+                        id=new_id("ev"), branch_id=br.id, date=d, headline=str(branch.get("headline") or j["question"])[:140],
+                        summary=f"[Juncture — {j['question']} p(yes)={p_yes:.2f}, rolled {roll:.2f} → {'YES' if yes else 'NO'}] "
+                                + str(branch.get("summary", "")), actors=_strlist(j.get("actors")), category="juncture",
+                        kind="juncture", confidence=round(p_yes if yes else 1 - p_yes, 2),
+                        divergence=0.5, importance=_int(j.get("importance"), 4), round=r, agent_actions=actions))
+                    self._log(sc, f"[{br.name}] Juncture {d}: {j['question']} — p={p_yes:.2f}, rolled {roll:.2f} → {'YES' if yes else 'NO'}",
+                              branch_id=br.id)
                 if not new_events:
                     new_events.append(Event(id=new_id("ev"), branch_id=br.id, date=d, headline="Quiet period",
                                             summary=str(out.get("world_state", "No decisive events.")), kind="simulated",
                                             confidence=0.5, importance=1, round=r, agent_actions=actions))
                 br.events.extend(new_events)
+                for c in due_c:
+                    c["resolved"] = True
+                for x in due_s:
+                    x["resolved"] = True
                 br.world_state = str(out.get("world_state", br.world_state))
                 ind = out.get("indicators") or {}
                 if isinstance(ind, dict):
@@ -558,11 +663,33 @@ class Engine:
                         if isinstance(note, str) and note.strip():
                             old = br.agent_memory.get(name, "")
                             br.agent_memory[name] = (old + " " + note.strip()).strip()[-1200:]
-                # also remember own thoughts
                 for a in actions:
                     if a["thoughts"]:
                         old = br.agent_memory.get(a["name"], "")
                         br.agent_memory[a["name"]] = (old + f" [{d}] " + a["thoughts"]).strip()[-1200:]
+                # --- dynamic cast
+                for name in (out.get("exits") or [])[:3]:
+                    if isinstance(name, str) and name in self._cast_names(sc, br) and name not in br.retired:
+                        br.retired.append(name)
+                        self._log(sc, f"[{br.name}] {name} leaves the stage ({d}).", branch_id=br.id)
+                for na in (out.get("new_actors") or [])[:2]:
+                    if not isinstance(na, dict) or not na.get("name") or len(self._active_personas(sc, br)) >= 14:
+                        continue
+                    if na["name"] in self._cast_names(sc, br) or na["name"] in br.retired:
+                        continue
+                    try:
+                        prof = await self.llm.json(P.fill(P.NEW_ACTOR_SYS, cutoff=br.knowledge_cutoff), P.fill(
+                            P.NEW_ACTOR_USER, title=sc.title, name=na["name"], role=na.get("role", ""), why=na.get("why_now", ""),
+                            date=d, cast=", ".join(self._cast_names(sc, br)), timeline=P.format_timeline(self.lineage_events(sc, br), 25)),
+                            kind="new_actor", ctx={"name": na["name"], "seed": br.id}, strong=True, max_tokens=900)
+                        g = lambda k: str(prof.get(k, "") or "")  # noqa: E731
+                        np_ = Persona(id=new_id("p"), name=g("name") or na["name"], role=g("role") or na.get("role", ""), goals=g("goals"),
+                                      stance=g("stance"), style=g("style"), resources=g("resources"), background=g("background"),
+                                      playbook=g("playbook"), relationships=g("relationships"), red_lines=g("red_lines"))
+                        br.extra_personas.append(np_)
+                        self._log(sc, f"[{br.name}] New actor enters ({d}): {np_.name} — {np_.role}", branch_id=br.id)
+                    except Exception as e:  # noqa: BLE001
+                        self._log(sc, f"[{br.name}] could not cast new actor {na.get('name')}: {e}", "warning", branch_id=br.id)
 
                 br.rounds_done = r + 1
                 br.progress = br.rounds_done / max(1, br.total_rounds)
@@ -572,7 +699,7 @@ class Engine:
                 self.bus.publish({"type": "branch_progress", "scenario_id": sc.id, "branch_id": br.id,
                                   "rounds_done": br.rounds_done, "total_rounds": br.total_rounds, "date": d})
 
-            # --- report
+            # unresolved dependent/contingent items after the horizon are simply left; report
             self._log(sc, f"[{br.name}] Writing branch report…", branch_id=br.id)
             br.report = await self._report(sc, br, parent)
             br.status = "completed"
@@ -580,6 +707,8 @@ class Engine:
             self.store.save(sc)
             self._log(sc, f"[{br.name}] Completed. p≈{br.report.get('probability_estimate', '?')}", branch_id=br.id)
             self.bus.publish({"type": "branch_status", "scenario_id": sc.id, "branch_id": br.id, "status": br.status})
+            if br.run_group:
+                self._maybe_aggregate(sc, br.run_group)
         except asyncio.CancelledError:
             br.status = "stopped"
             self.store.save(sc)
@@ -593,14 +722,54 @@ class Engine:
             log.error(traceback.format_exc())
             self.bus.publish({"type": "branch_status", "scenario_id": sc.id, "branch_id": br.id, "status": br.status})
 
+    def _maybe_aggregate(self, sc: Scenario, group: str):
+        sibs = [b for b in sc.branches.values() if b.run_group == group]
+        if sibs and all(b.status in ("completed", "failed", "stopped") for b in sibs):
+            self.tasks[f"agg:{group}"] = asyncio.create_task(self.aggregate(sc.id, group), name=f"agg:{group}")
+
+    async def aggregate(self, sid: str, group: str) -> dict:
+        sc = self.store.get(sid)
+        if not sc:
+            raise KeyError("scenario not found")
+        sibs = [b for b in sc.branches.values() if b.run_group == group and b.status == "completed"]
+        if not sibs:
+            raise KeyError("no completed runs in this group")
+        runs_txt = []
+        for b in sibs:
+            junc = "; ".join(f"{j['date']} {j['question']} → {j['outcome'].upper()} (p={j['p_yes']})" for j in b.junctures[:8])
+            runs_txt.append(f"=== {b.name} (seed {b.seed}) ===\nSummary: {b.report.get('summary', '')}\nJunctures: {junc or 'none'}\n"
+                            f"Timeline:\n{P.format_timeline(b.events, 30)}")
+        out = await self.llm.json(P.AGGREGATE_SYS, P.fill(P.AGGREGATE_USER, title=sc.title, question=sc.question,
+                                                            premise=sibs[0].premise or "(plain forecast)", runs="\n\n".join(runs_txt)[:60000]),
+                                  kind="aggregate", ctx={"seed": group, "n": len(sibs)}, strong=True, max_tokens=2600, temperature=0.2)
+        out["group"] = group
+        out["n_runs"] = len(sibs)
+        out["branch_ids"] = [b.id for b in sibs]
+        for b in sibs:
+            b.report["aggregate"] = out
+        self.store.save(sc)
+        self._log(sc, f"Aggregated {len(sibs)} runs of “{sibs[0].name.rsplit(' #', 1)[0]}”.")
+        self.bus.publish({"type": "branch_status", "scenario_id": sc.id, "branch_id": sibs[0].id, "status": "aggregated"})
+        return out
+
+
     async def _report(self, sc: Scenario, br: Branch, parent: Branch | None) -> dict:
         parent_block = ""
         if parent:
             pev = [e for e in self.lineage_events(sc, parent) if e.date >= br.fork_date]
             parent_block = f"PARENT TIMELINE ({parent.name}) AFTER THE FORK:\n{P.format_timeline(pev)}\n"
-        out = await self.llm.json(P.REPORT_SYS, P.fill(P.REPORT_USER, 
+        world_lines = []
+        if br.causal_map:
+            world_lines.append("CAUSAL MAP OF REAL POST-FORK EVENTS (analyst-level; the actors never saw this):")
+            world_lines += [f"- {c['date']} {c['headline']}: {c['verdict'].upper()} p={c['p']:.2f} — {c['rationale']}" for c in br.causal_map[:25]]
+        if br.junctures:
+            world_lines.append("JUNCTURES ROLLED IN THIS RUN:")
+            world_lines += [f"- {j['date']} {j['question']} — p(yes)={j['p_yes']}, rolled {j['roll']} → {j['outcome'].upper()}: {j['headline']}" for j in br.junctures]
+        if br.extra_personas or br.retired:
+            world_lines.append("CAST CHANGES: entered " + (", ".join(p.name for p in br.extra_personas) or "none") + "; exited " + (", ".join(br.retired) or "none"))
+        out = await self.llm.json(P.REPORT_SYS, P.fill(P.REPORT_USER,
             title=sc.title, question=sc.question, name=br.name, premise_block=P.premise_block(br.premise, br.fork_date),
-            fork_date=br.fork_date, horizon=sc.horizon_date, parent_block=parent_block,
+            fork_date=br.fork_date, horizon=sc.horizon_date, parent_block=parent_block, world_block="\n".join(world_lines),
             timeline=P.format_timeline([e for e in br.events]), world_state=br.world_state),
             kind="report", ctx={"premise": br.premise, "topic": sc.title, "seed": br.id}, max_tokens=2400, temperature=0.4, strong=True)
         out["probability_estimate"] = _float(out.get("probability_estimate"), 0.5)
@@ -612,7 +781,7 @@ class Engine:
         br = sc.branches.get(bid) if sc else None
         if not sc or not br:
             raise KeyError("not found")
-        p = next((x for x in sc.personas if x.id == persona_id), None)
+        p = next((x for x in sc.personas + br.extra_personas if x.id == persona_id), None)
         if not p:
             raise KeyError("persona not found")
         d = br.events[-1].date if br.events else br.fork_date
@@ -708,3 +877,22 @@ def _apply_dossier(p: Persona, d: dict):
         style_bits.append(f"voice: {voice['style']}")
     if style_bits:
         p.style = "; ".join(style_bits)[:700]
+
+
+def suggested_rounds(days: int, step: int, cap: int) -> int:
+    """More rounds for longer horizons: ~1 per step up to cap, but never fewer than 6 for spans > 1 year."""
+    natural = max(1, math.ceil(days / max(1, step)))
+    if days > 365 * 3:
+        return max(cap, 24)
+    if days > 365:
+        return max(cap, 16)
+    return min(cap, max(natural, 1)) if natural < cap else cap
+
+
+def _elapsed(start: str, end: str) -> str:
+    days = (date.fromisoformat(end) - date.fromisoformat(start)).days
+    if days < 60:
+        return f"{days} days"
+    if days < 730:
+        return f"{days // 30} months"
+    return f"{days / 365.25:.1f} years"

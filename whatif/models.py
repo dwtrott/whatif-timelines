@@ -75,6 +75,15 @@ class Branch:
     error: str = ""
     created_at: str = ""
     depth: int = 0
+    # --- world model (v0.4)
+    seed: int = 0                                          # RNG seed for junctures (runs differ by seed)
+    run_group: str = ""                                    # Monte-Carlo sibling group id
+    causal_map: list[dict] = field(default_factory=list)   # dependence verdicts for parent's post-fork events
+    structural: list[dict] = field(default_factory=list)   # scheduled/structural events + actor lifecycle
+    junctures: list[dict] = field(default_factory=list)    # rolled junctures: question, p, roll, outcome
+    extra_personas: list[Persona] = field(default_factory=list)   # actors who entered during this branch
+    retired: list[str] = field(default_factory=list)       # names who left the stage
+    world_notes: str = ""                                  # causal-map notes (biggest uncertainties)
 
     def events_until(self, iso: str) -> list[Event]:
         return [e for e in self.events if e.date <= iso]
@@ -116,6 +125,7 @@ class Scenario:
         for bid, b in (d.get("branches") or {}).items():
             b = dict(b)
             b["events"] = [Event(**e) for e in b.get("events", [])]
+            b["extra_personas"] = [Persona(**p) for p in b.get("extra_personas", [])]
             branches[bid] = Branch(**b)
         d["branches"] = branches
         return cls(**d)

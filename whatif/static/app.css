@@ -98,7 +98,8 @@ code, .mono { font-family: var(--mono); font-size: 12px; }
 .inherit { stroke-dasharray: 2 5; stroke-width: 1.5; opacity: .5; fill: none; }
 .forkLink { fill: none; stroke-width: 2; opacity: .8; }
 .ev { cursor: pointer; }
-.ev circle.core { stroke: #0b0f17; stroke-width: 1.5; }
+.ev circle.core, .ev rect.core { stroke: #0b0f17; stroke-width: 1.5; }
+.ev:hover rect.core, .ev.selected rect.core { stroke: #fff; stroke-width: 2.5; }
 .ev.premise circle.core { stroke: #fff; stroke-width: 2.5; }
 .ev circle.ring { fill: none; stroke: var(--bad); }
 .ev:hover circle.core, .ev.selected circle.core { stroke: #fff; stroke-width: 2.5; }

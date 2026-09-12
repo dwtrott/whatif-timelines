@@ -37,8 +37,10 @@ Return JSON: {"briefing": "<600-1000 words of markdown>", "removed": ["short not
 "open_questions": ["3-6 questions that were genuinely open at the cutoff"]}"""
 
 GROUND_USER = """KNOWLEDGE CUTOFF DATE: {cutoff}
-Scenario: {title} — {question}
+Situation: {title}
 {premise_block}
+Cover the whole situation evenly — politics, economy, security, key institutions, foreign relations, technology,
+scheduled events ahead — not just one theme.
 Raw material follows (each section notes what date its content reflects):
 
 {raw}"""
@@ -50,7 +52,9 @@ material. Extract the significant, verifiable events in the requested date windo
 Return JSON: {"events": [{"date": "YYYY-MM-DD", "headline": "<= 12 words", "summary": "1-3 sentences",
 "actors": ["..."], "category": "political|economic|security|media|legal|social|technology|other",
 "importance": 1-5}]}
-- 8 to 20 events, chronological, dates as precise as the material allows (use the 1st of the month if only the month is known).
+- 10 to 30 events, chronological, dates as precise as the material allows (use the 1st of the month if only the month is known).
+- Cover ALL domains that mattered in the window (politics, economy, security, technology, society, foreign affairs),
+  not only the ones related to the analyst's question — the question says what to measure, not what happened.
 - Only events inside the window. No speculation. If the material does not cover the window, return fewer events."""
 
 ACTUAL_USER = """Window: {start} to {end}
@@ -85,7 +89,9 @@ Return JSON: {"personas": [{"name": "...", "role": "office/position in this situ
 "red_lines": "what they will not accept and will escalate over"}]}"""
 
 
-PERSONAS_USER = """Scenario: {title} — {question}
+PERSONAS_USER = """Scenario: {title}
+Analyst's question (this says what will be MEASURED, not what will happen — cast the whole system that shaped the
+period, not only actors related to the question): {question}
 As-of date: {cutoff}
 
 Briefing:
@@ -137,36 +143,53 @@ YOUR MEMORY / RUNNING NOTES:
 {memory}
 
 CURRENT WORLD STATE ({date}): {world_state}
+{exogenous_block}
+YOUR OWN RECENT MOVES (do not repeat a move unless it worked and the situation still calls for it):
+{past_actions}
 
-It is now the period ending {date}. Decide what you do."""
+It is now the period ending {date} — {elapsed} since the fork. Time has passed: agendas, offices and alliances move on.
+Decide what you do."""
 
 
-ARBITER_SYS = """You are the WORLD MODEL of a forecasting simulation: an impartial adjudicator who turns the actions of
-many actors into what actually happens. It is {date}; the actors know nothing after {cutoff} beyond this branch's
-own timeline.
+ARBITER_SYS = """You are the WORLD MODEL of a counterfactual simulation: an impartial adjudicator who turns the actions of
+many actors, plus everything else going on in the world, into what actually happens. It is {date}; the actors know
+nothing after {cutoff} beyond this branch's own timeline. You are NOT told what the analyst wants to find out, and you
+must not steer toward any tidy answer — adjudicate from actions, structure and chance.
 
 Adjudication principles:
-- Power and motivation decide outcomes. A determined actor with money, loyal staff or legal authority usually gets
-  much of what they push for; an institution with no champion drifts. Do not split the difference to be safe.
-- Consequences are SPECIFIC: named people resign, sign, sue, defect, get hired; named firms announce, fund, poach;
-  numbers where they matter (headcount, dollars, votes, share price moves). Never write "regulatory scrutiny
-  increases" or "public trust erodes" unless you name the regulator and its action, or the poll and its number.
-- Stay in character for the world: second-order effects, opportunists exploiting the moment, things going wrong,
-  bluffs being called. One genuinely surprising-but-plausible development every few periods is realistic.
-- Honour the counterfactual premise throughout. Do not quietly steer events back toward the parent timeline; if the
-  branch converges, it must be because named actors made it converge.
-- Not every action succeeds. Decide who wins each clash and say why.
+- Power and motivation decide clashes. A determined actor with money, loyal staff or legal authority usually gets much
+  of what they push for; an institution with no champion drifts. Do not split the difference to be safe.
+- THE REST OF THE WORLD KEEPS HAPPENING. You receive (a) EXOGENOUS EVENTS due this period — things from the real
+  timeline judged causally independent of the fork (they occur unless a named actor in this branch has plausibly
+  intercepted or altered them — say which and how), and (b) STRUCTURAL EVENTS — elections, term limits, scheduled
+  meetings, budget cycles, ageing/retirements. Resolve every one that falls in this period. Elections have results;
+  terms end; people leave office and successors appear.
+- CONTINGENT OUTCOMES ARE ROLLED, NOT CHOSEN. For every pivotal uncertain outcome this period (a contingent exogenous
+  event, an election, whether a plot is intercepted, whether a deal closes), output a JUNCTURE with your honest
+  probability and BOTH outcomes described. The engine rolls dice; you do not decide which happens. Calibrate: use
+  base rates and the specific situation; avoid 0.5 as a default.
+- Consequences are SPECIFIC: named people resign, sign, sue, defect, get hired; named firms/agencies act; numbers where
+  they matter. Never "scrutiny increases" or "trust erodes" without the actor and the act.
+- REPETITION IS FAILURE. If the last periods were press conference / hearing / statement cycles, the world has moved
+  on: new issues crowd the agenda, new actors enter, old ones exit. Bring in NEW ACTORS when the situation creates
+  them (a successor, a challenger, a whistleblower, a foreign leader, a movement) and RETIRE actors who leave the
+  stage. Honour the counterfactual premise; do not quietly revert to the parent timeline.
 
 Return JSON:
 {"events": [{"date": "YYYY-MM-DD (within this period)", "headline": "<= 12 words, newspaper style, with names",
-"summary": "2-3 sentences: what happened, who did it, what it changes", "actors": ["..."],
-"category": "political|economic|security|media|legal|social|technology|corporate|other",
-"confidence": 0.0-1.0, "divergence": 0.0-1.0, "importance": 1-5}],
-"world_state": "2-3 sentences summarising the balance of power at the end of the period",
-"indicators": {"tension": 0-1, "public_support": 0-1, "economic_stress": 0-1},
-"memory_updates": {"<persona name>": "one sentence this actor will remember"}}
-- 1 to 3 events. divergence = how different from the PARENT timeline in the same period (0 = same thing happened,
-  1 = radically different); 0 when there is no parent."""
+  "summary": "2-3 sentences: what happened, who did it, what it changes", "actors": ["..."],
+  "category": "political|economic|security|media|legal|social|technology|corporate|foreign|other",
+  "confidence": 0.0-1.0, "divergence": 0.0-1.0, "importance": 1-5,
+  "exogenous": true/false (true if this is an independent real-world event playing out)}],
+ "junctures": [{"question": "what is uncertain", "p_yes": 0.0-1.0, "if_yes": {"headline": "...", "summary": "..."},
+  "if_no": {"headline": "...", "summary": "..."}, "importance": 1-5, "actors": ["..."]}],
+ "new_actors": [{"name": "real person or precise office", "role": "...", "why_now": "..."}],
+ "exits": ["name of actor who leaves the stage this period, with no further agency"],
+ "world_state": "3-4 sentences: balance of power and the main open issues at the end of the period",
+ "indicators": {"tension": 0-1, "public_support": 0-1, "economic_stress": 0-1},
+ "memory_updates": {"<persona name>": "one sentence this actor will remember"}}
+- 1 to 3 events plus 0 to 2 junctures. divergence = how different from the PARENT timeline in the same period
+  (0 = same thing happened, 1 = radically different); 0 when there is no parent."""
 
 
 ARBITER_USER = """{premise_block}
@@ -174,14 +197,17 @@ ARBITER_USER = """{premise_block}
 BRIEFING (as of {cutoff}):
 {briefing_short}
 
-TIMELINE SO FAR ON THIS BRANCH:
+TIMELINE SO FAR ON THIS BRANCH ({elapsed} since the fork):
 {timeline}
 
+{exogenous_block}
 {parent_block}
+CAST CURRENTLY ON STAGE: {cast}
+
 ACTIONS THIS PERIOD ({date}):
 {actions}
 
-Adjudicate the period ending {date}."""
+Adjudicate the period {prev} → {date}."""
 
 
 REPORT_SYS = """You are the lead analyst writing up one branch of a counterfactual forecasting simulation for a
@@ -195,13 +221,17 @@ Return JSON: {"summary": "3-5 sentence executive summary",
 "converges": true/false (does the branch eventually end up near the parent timeline anyway?),
 "convergence_note": "one or two sentences",
 "signposts": ["observable early indicators that would tell you this branch was happening", ...],
-"assumptions": ["the 2-4 assumptions about specific actors' behaviour that this branch's story depends on most"]}"""
+"assumptions": ["the 2-4 assumptions about specific actors' behaviour that this branch's story depends on most"],
+"answer_to_question": "direct answer to the analyst's question for THIS run, naming the junctures/rolls it hinged on",
+"dice_sensitivity": "which rolled junctures, had they gone the other way, would most change the answer"}"""
 
-REPORT_USER = """Scenario: {title} — {question}
+REPORT_USER = """Scenario: {title}
+Analyst's question (answer it explicitly, with the evidence from THIS run, and say what a different dice roll would have changed): {question}
 Branch: {name}
 {premise_block}
 Fork date: {fork_date}    Horizon: {horizon}
 
+{world_block}
 {parent_block}
 THIS BRANCH'S TIMELINE:
 {timeline}
@@ -362,3 +392,71 @@ Return JSON: {"leakage": ["quoted fragment — why it is post-cutoff"], "unsuppo
 DOSSIER_CRITIC_USER = """Actor: {name}
 Profile JSON:
 {dossier}"""
+
+
+
+# ====================================================================== counterfactual world model
+CAUSAL_MAP_SYS = """You are a historian-methodologist preparing a counterfactual simulation. A branch of history forks at
+{fork_date} under a stated premise. Two tasks:
+
+TASK A — CAUSAL DEPENDENCE of the real events that followed the fork in the ACTUAL timeline. For each listed event,
+classify:
+- "independent": would still occur essentially unchanged — its causes were already in motion or lie outside the
+  premise's reach (e.g. a plot already staffed and funded, a scheduled election, a natural disaster, a foreign
+  government's internal decision). Say what could intercept or alter it, and who in the cast could plausibly do so.
+- "dependent": follows from the actual course that the premise changes — it does not happen, or happens very
+  differently. Say why.
+- "contingent": could go either way; give p = probability it still occurs (roughly as it did) in the branch, and
+  what it hinges on.
+Use the minimal-rewrite principle: change only what the premise forces and what follows from it.
+
+TASK B — STRUCTURAL CALENDAR for the branch from {fork_date} to {horizon}: things that happen on schedule or by
+structural necessity regardless of the premise and knowable at the fork date — elections and their dates, term limits
+and mandatory departures, budget/legislative cycles, scheduled summits/treaties/expiries, demographic or technology
+trends already under way — plus ACTOR LIFECYCLE constraints for the cast (term ends, age at fork, statutory limits,
+health if publicly known before the fork). Do not include actual post-fork outcomes here (those belong in Task A).
+
+Return JSON:
+{"causal_map": [{"event_id": "...", "date": "...", "headline": "...", "verdict": "independent|dependent|contingent",
+  "p": 0.0-1.0, "rationale": "1-2 sentences", "interceptable_by": ["cast names or 'none'"]}],
+ "structural": [{"date": "YYYY-MM-DD", "event": "...", "kind": "election|term_end|scheduled|trend|lifecycle",
+  "actor": "name if it concerns one actor", "note": "what must be resolved"}],
+ "notes": "2-3 sentences on where the biggest uncertainty lies"}"""
+
+CAUSAL_MAP_USER = """Scenario: {title}
+Fork date: {fork_date}    Horizon: {horizon}
+PREMISE: {premise}
+Cast: {cast}
+
+REAL EVENTS AFTER THE FORK (actual timeline / parent lane):
+{events}"""
+
+
+NEW_ACTOR_SYS = """You are casting one additional actor who has just entered a running simulation. Knowledge cutoff for
+what the actor knows: {cutoff} plus the branch timeline provided. Give a specific, behavioural profile in the same
+schema as the rest of the cast. If a real named person fits the office at that time, use them.
+Return JSON: {"name": "...", "role": "...", "goals": "...", "stance": "...", "style": "...", "resources": "...",
+"background": "...", "playbook": "...", "relationships": "...", "red_lines": "..."}"""
+
+NEW_ACTOR_USER = """Scenario: {title}
+Who enters: {name} — {role}. Why now: {why}
+Date: {date}
+Existing cast: {cast}
+Branch timeline so far:
+{timeline}"""
+
+
+AGGREGATE_SYS = """You aggregate several independent simulation runs of the same counterfactual branch. Code each run against
+the analyst's question(s) and summarise the distribution honestly — the point is the spread across runs, not a single
+story. Return JSON: {"outcome_questions": ["yes/no or categorical questions derived from the analyst's question"],
+"per_run": [{"run": "run name", "answers": {"<question>": "yes|no|partial|n/a"}, "one_line": "what happened in this run"}],
+"frequencies": {"<question>": {"yes": n, "no": n, "partial": n}},
+"summary": "200-300 words: what is robust across runs, what varies and why, which junctures decide it",
+"decisive_junctures": ["the junctures/dice rolls that most determine the answer"]}"""
+
+AGGREGATE_USER = """Scenario: {title}
+Analyst's question: {question}
+Premise shared by all runs: {premise}
+
+RUNS:
+{runs}"""
