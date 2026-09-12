@@ -474,9 +474,10 @@ and mandatory departures, budget/legislative cycles, scheduled summits/treaties/
 trends already under way — plus ACTOR LIFECYCLE constraints for the cast (term ends, age at fork, statutory limits,
 health if publicly known before the fork). Do not include actual post-fork outcomes here (those belong in Task A).
 
+Keep it compact: rationale ≤ 25 words each; omit "headline" (the id is enough).
 Return JSON:
-{"causal_map": [{"event_id": "...", "date": "...", "headline": "...", "verdict": "independent|dependent|contingent",
-  "p": 0.0-1.0, "rationale": "1-2 sentences", "interceptable_by": ["cast names or 'none'"]}],
+{"causal_map": [{"event_id": "...", "date": "...", "verdict": "independent|dependent|contingent",
+  "p": 0.0-1.0, "rationale": "≤ 25 words", "interceptable_by": ["cast names or 'none'"]}],
  "structural": [{"date": "YYYY-MM-DD", "event": "...", "kind": "election|term_end|scheduled|trend|lifecycle",
   "actor": "name if it concerns one actor", "note": "what must be resolved"}],
  "notes": "2-3 sentences on where the biggest uncertainty lies"}"""

@@ -534,7 +534,9 @@ class Engine:
         future = [e for e in self.lineage_events(sc, parent)] if parent else []
         future = [e for e in future if e.date > br.fork_date and e.kind != "premise"]
         cast = self._cast_names(sc, br)
-        ev_txt = "\n".join(f"- id={e.id} {e.date} [{e.kind}] {e.headline} — {e.summary[:220]}" for e in future[:60]) or "(none recorded)"
+        if len(future) > 45:  # keep the consequential ones; the rest still exist on the parent lane
+            future = sorted(sorted(future, key=lambda e: (-e.importance, e.date))[:45], key=lambda e: e.date)
+        ev_txt = "\n".join(f"- id={e.id} {e.date} [{e.kind}] {e.headline} — {e.summary[:160]}" for e in future) or "(none recorded)"
         hz = self._horizon(sc, br)
         future = [e for e in future if e.date <= hz]
         out = await self.llm.json(P.fill(P.CAUSAL_MAP_SYS, fork_date=br.fork_date, horizon=hz),
@@ -543,7 +545,7 @@ class Engine:
                                          cast=", ".join(cast), events=ev_txt),
                                   kind="causal_map", ctx={"seed": br.id, "dates": [e.date for e in future[:8]],
                                                           "ids": [e.id for e in future[:8]]},
-                                  strong=True, max_tokens=3600, temperature=0.2)
+                                  strong=True, max_tokens=6000, temperature=0.2)
         by_id = {e.id: e for e in future}
         cmap = []
         for c in out.get("causal_map", []) or []:
@@ -701,7 +703,7 @@ class Engine:
                                           cast="\n".join(f"- {p.name} ({p.role}) — {_state_line(br, p)}" for p in personas),
                                           actions=actions_txt, messages=messages_txt, date=d, prev=prev, period_len=_elapsed(prev, d)),
                     kind="arbiter", ctx={"date": d, "premise": br.premise, "topic": sc.title, "seed": br.id + d,
-                                         "has_parent": bool(parent)}, max_tokens=2600, strong=True)
+                                         "has_parent": bool(parent)}, max_tokens=4000, strong=True)
                 # --- plausibility critic (surgical corrections before anything is committed)
                 if self.s.critic:
                     try:

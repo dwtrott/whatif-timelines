@@ -63,6 +63,7 @@ class LLM:
         self.limiter = RateLimiter(settings.rpm)
         self.on_call = on_call
         self.calls = 0
+        self.last_finish_reason = ""
         self.inflight: dict[int, dict] = {}
         self.tokens_in = 0
         self.tokens_out = 0
@@ -221,6 +222,7 @@ class LLM:
             data = r.json()
             try:
                 content = data["choices"][0]["message"]["content"] or ""
+                self.last_finish_reason = data["choices"][0].get("finish_reason", "")
             except (KeyError, IndexError, TypeError) as e:
                 raise LLMError(f"Unexpected response shape: {str(data)[:300]}") from e
             usage = data.get("usage") or {}
@@ -243,15 +245,27 @@ class LLM:
             {"role": "user", "content": user},
         ]
         last = ""
-        for attempt in range(retries + 1):
-            last = await self.chat(messages, json_mode=True, kind=kind, ctx=ctx, max_tokens=max_tokens,
+        budget = max_tokens
+        for attempt in range(retries + 2):
+            self.last_finish_reason = ""
+            last = await self.chat(messages, json_mode=True, kind=kind, ctx=ctx, max_tokens=budget,
                                    temperature=temperature, model=model)
             obj = extract_json(last)
             if obj is not None:
                 return obj
+            truncated = self.last_finish_reason == "length" or (last and not last.rstrip().endswith("}"))
+            if truncated and budget < 12000:
+                # output was cut off: retry once with a bigger budget and a request for brevity
+                budget = min(12000, budget * 2)
+                if self.on_note:
+                    self.on_note(f"LLM '{kind}' output was truncated; retrying with max_tokens={budget}")
+                messages = messages[:2]
+                messages[1] = {"role": "user", "content": user + "\n\nKeep every string short; the whole JSON must fit in the reply."}
+                continue
             messages.append({"role": "assistant", "content": last})
             messages.append({"role": "user", "content": "That was not valid JSON. Return ONLY the JSON object."})
-        raise LLMError(f"Model did not return JSON for {kind or 'request'}: {last[:200]}")
+        raise LLMError(f"Model did not return valid JSON for {kind or 'request'} "
+                       f"(finish_reason={self.last_finish_reason or '?'}, {len(last)} chars): {last[:160]}")
 
 
 def _provider_message(text: str) -> str:
