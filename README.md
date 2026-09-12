@@ -110,6 +110,10 @@ timeline GUI.
 * For topics before ~2002 there is no pre-event Wikipedia revision; the leakage filter is doing the work. Check the
   "stripped" notes in each lane's briefing.
 * Free tiers rate-limit hard; the client backs off and honours `Retry-After`, so a branch may simply take longer.
+  A retry-after longer than 3 minutes (a daily cap) fails the branch immediately with the provider's message.
+* **OpenAI accounts without billing** are capped at ~200 requests/day for gpt-4o-mini — one branch. Adding $5 of
+  credit (Tier 1) lifts that to 10,000/day. Check <https://platform.openai.com/settings/organization/limits>.
+* GDELT is rate-limited per IP; from shared cloud egress (Colab) it is usually unavailable and is skipped.
 
 ## Publish to GitHub (first time)
 

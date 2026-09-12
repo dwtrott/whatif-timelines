@@ -208,20 +208,32 @@ class Retriever:
         global _GDELT_LOCK, _GDELT_LAST
         if _GDELT_LOCK is None:
             _GDELT_LOCK = asyncio.Lock()
+        if getattr(self, "_gdelt_blocked", False):
+            return []
         try:
-            async with _GDELT_LOCK:  # GDELT allows one request per 5 seconds per IP
-                import time as _t
-                gap = 5.2 - (_t.monotonic() - _GDELT_LAST)
-                if gap > 0:
-                    await asyncio.sleep(gap)
-                _GDELT_LAST = _t.monotonic()
-                r = await c.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params)
-            if r.status_code != 200 or not r.text.strip().startswith("{"):
-                self._err(f"GDELT '{query}'", f"HTTP {r.status_code} — {r.text[:160].strip()}")
+            arts = None
+            for attempt in range(2):
+                async with _GDELT_LOCK:  # GDELT allows one request per 5 seconds per IP
+                    import time as _t
+                    gap = 6.0 - (_t.monotonic() - _GDELT_LAST)
+                    if gap > 0:
+                        await asyncio.sleep(gap)
+                    _GDELT_LAST = _t.monotonic()
+                    r = await c.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params)
+                if r.status_code == 200 and r.text.strip().startswith("{"):
+                    arts = r.json().get("articles", [])
+                    break
+                if r.status_code == 429 and attempt == 0:
+                    continue
+                self._gdelt_blocked = True
+                self._err("GDELT", "rate-limited from this IP (shared cloud egress, e.g. Colab) — headlines skipped; "
+                                   "Wikipedia as-of revisions still ground the agents")
                 return []
-            arts = r.json().get("articles", [])
+            if arts is None:
+                return []
         except Exception as e:  # noqa: BLE001
-            self._err(f"GDELT '{query}'", e)
+            self._gdelt_blocked = True
+            self._err("GDELT", f"unreachable ({type(e).__name__}) — headlines skipped")
             return []
         docs = []
         for a in arts:
@@ -237,6 +249,7 @@ class Retriever:
                      event_titles: list[str] | None = None) -> list[Doc]:
         docs: list[Doc] = []
         self.errors = []
+        self._gdelt_blocked = False
         if not titles:
             self.errors.append("Wikipedia: no article titles to fetch (title suggestion step returned none)")
         wiki_task = self.wiki_docs(titles, cutoff, want_latest=want_latest, event_titles=event_titles)

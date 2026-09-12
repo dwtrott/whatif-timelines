@@ -119,8 +119,9 @@ class Engine:
                         kind="articles", ctx={"hint_titles": [sc.title]}),
                     _search())
                 self._log(sc, f"Title step done in {asyncio.get_event_loop().time() - t0:.1f}s")
-                sc.wiki_titles = [t for t in out.get("titles", []) if isinstance(t, str)][:self.s.max_wiki_articles + 2]
-                sc.wiki_titles = list(dict.fromkeys(sc.wiki_titles + (hint or [])[:2]))[: self.s.max_wiki_articles + 2]
+                sc.wiki_titles = list(dict.fromkeys(t for t in out.get("titles", []) if isinstance(t, str)))[: self.s.max_wiki_articles + 2]
+                if not sc.wiki_titles:  # model gave nothing usable — fall back to the keyword search
+                    sc.wiki_titles = (hint or [sc.title])[: self.s.max_wiki_articles]
                 sc.event_titles = [t for t in out.get("event_titles", []) if isinstance(t, str)][:4]
                 queries = [q for q in out.get("queries", []) if isinstance(q, str)][:3]
             else:

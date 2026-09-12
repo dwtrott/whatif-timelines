@@ -580,7 +580,9 @@ async function createScenario() {
     wiki_titles: $('#fTitles').value.split(',').map(s => s.trim()).filter(Boolean),
     user_docs: $('#fDocs').value.trim() ? [{title: 'Seed document', text: $('#fDocs').value}] : [],
   };
-  if (!body.title || !body.anchor_date || !body.horizon_date) return alert('Title, anchor and horizon are required.');
+  const missing = [!body.title && 'Title', !body.anchor_date && 'Anchor date (must be a real calendar date)', !body.horizon_date && 'Horizon date (must be a real calendar date — e.g. April has 30 days)'].filter(Boolean);
+  if (missing.length) return alert('Please fix: ' + missing.join('; '));
+  if (body.horizon_date <= body.anchor_date) return alert('Horizon must be after the anchor date.');
   const btn = $('#createScenarioBtn'); btn.disabled = true;
   try {
     const sc = await api('/api/scenarios', 'POST', body);

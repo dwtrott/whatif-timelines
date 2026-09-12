@@ -191,9 +191,15 @@ class LLM:
                 last_err = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
                 retry_after = r.headers.get("retry-after")
                 wait = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else delay
+                provider_msg = _provider_message(r.text)
+                if wait > 180:
+                    # a long retry-after means a daily/tier cap, not a burst — waiting silently helps nobody
+                    raise LLMError(f"{self.s.provider} rate limit — retry-after {wait / 60:.0f} min: {provider_msg}. "
+                                   f"Check the provider's usage/limits page (OpenAI accounts without billing get ~200 "
+                                   f"requests/day), or switch provider in the GUI.")
                 log.warning("LLM %s, waiting %.1fs (attempt %d)", r.status_code, wait, attempt + 1)
                 if self.on_note:
-                    self.on_note(f"LLM HTTP {r.status_code} ({r.text[:120].strip()}); waiting {wait:.0f}s, retry {attempt + 1}/6")
+                    self.on_note(f"LLM HTTP {r.status_code}: {provider_msg[:300]} — waiting {wait:.0f}s, retry {attempt + 1}/6")
                 await asyncio.sleep(wait + random.random())
                 delay = min(delay * 2, 40)
                 continue
@@ -242,6 +248,19 @@ class LLM:
             messages.append({"role": "assistant", "content": last})
             messages.append({"role": "user", "content": "That was not valid JSON. Return ONLY the JSON object."})
         raise LLMError(f"Model did not return JSON for {kind or 'request'}: {last[:200]}")
+
+
+def _provider_message(text: str) -> str:
+    """Pull the human message out of an error body if it is JSON; else return the raw text, compacted."""
+    try:
+        obj = _json.loads(text)
+        err = obj.get("error", obj)
+        msg = err.get("message") if isinstance(err, dict) else None
+        if msg:
+            return " ".join(str(msg).split())
+    except Exception:  # noqa: BLE001
+        pass
+    return " ".join(text.split())[:400]
 
 
 def _supports_json_mode(base_url: str) -> bool:
