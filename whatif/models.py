@@ -85,6 +85,7 @@ class Scenario:
     status: str = "new"           # new | retrieving | ready | failed
     error: str = ""
     wiki_titles: list[str] = field(default_factory=list)
+    event_titles: list[str] = field(default_factory=list)
     user_docs: list[dict] = field(default_factory=list)
     personas: list[Persona] = field(default_factory=list)
     docs: list[dict] = field(default_factory=list)          # retrieved corpus (serialised Doc)

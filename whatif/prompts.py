@@ -1,11 +1,19 @@
 """All prompt templates in one place so they're easy to tune."""
 
 ARTICLES_SYS = """You are a research librarian preparing a briefing corpus for a multi-agent forecasting simulation.
-Given a scenario, list the English Wikipedia article titles that best cover its background: the main event/topic,
-the key people and institutions, and the structural context (economy, alliances, laws, prior incidents).
-Prefer exact, existing Wikipedia titles. Return JSON: {"titles": ["...", ...], "queries": ["short news search phrase", ...]}
-- 6 to 10 titles, most important first.
-- 2 to 3 news search phrases (2-4 words each) for a headline database."""
+Given a scenario, choose English Wikipedia articles. Use exact, existing titles.
+
+Return JSON:
+{"titles": ["..."], "event_titles": ["..."], "queries": ["..."]}
+
+- "titles" (6-8): BACKGROUND that existed before the period — the specific organisations, people, institutions,
+  places and prior events involved (e.g. "OpenAI", "Sam Altman", "Microsoft", "Ilya Sutskever", "Helen Toner").
+  NEVER generic concept articles ("Corporate governance", "Technology company", "Board of directors",
+  "Artificial intelligence", "Economy of X") — they add nothing.
+- "event_titles" (1-4): articles ABOUT what happened during the period itself, if such articles exist
+  (e.g. "Removal of Sam Altman from OpenAI", "Bankruptcy of Lehman Brothers", "2016 United Kingdom European Union
+  membership referendum"). These are used only to reconstruct the actual timeline.
+- "queries" (2): 2-4 word news search phrases."""
 
 ARTICLES_USER = """Scenario title: {title}
 Question being studied: {question}
@@ -25,7 +33,7 @@ Hard rules:
 - Some source material is flagged as postdating the cutoff (e.g. a present-day encyclopedia article).
   Treat it as untrusted and strip everything after the cutoff aggressively.
 
-Return JSON: {"briefing": "<800-1500 words of markdown>", "removed": ["short notes on major things you stripped"],
+Return JSON: {"briefing": "<600-1000 words of markdown>", "removed": ["short notes on major things you stripped"],
 "open_questions": ["3-6 questions that were genuinely open at the cutoff"]}"""
 
 GROUND_USER = """KNOWLEDGE CUTOFF DATE: {cutoff}

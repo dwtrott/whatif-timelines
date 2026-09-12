@@ -243,6 +243,12 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    @app.get("/api/log")
+    async def recent_log(after: int = 0, limit: int = 200):
+        """Polling fallback for the activity console (SSE does not survive some proxies, e.g. Colab's)."""
+        items = [m for m in bus.recent if m.get("seq", 0) > after]
+        return {"items": items[-limit:], "seq": getattr(bus, "seq", 0)}
+
     @app.get("/health")
     async def health():
         return {"ok": True, "provider": engine.s.provider, "model": engine.s.model}

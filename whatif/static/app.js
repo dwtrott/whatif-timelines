@@ -11,7 +11,7 @@ const daysBetween = (a, b) => Math.round((parseD(b) - parseD(a)) / DAY);
 
 const state = {
   config: null, scenarios: [], sc: null, sel: null, pxPerDay: null, laneOrder: [], hoverTimer: null,
-  sse: null, pollTimer: null, chat: {},
+  sse: null, pollTimer: null, chat: {}, lastSeq: 0,
 };
 
 // ------------------------------------------------------------------ api
@@ -90,12 +90,8 @@ function schedulePoll() {
 }
 
 // ------------------------------------------------------------------ SSE console
-function connectSSE() {
-  if (state.sse) state.sse.close();
-  const es = new EventSource('/api/events');
-  state.sse = es;
-  es.onmessage = ev => {
-    const m = JSON.parse(ev.data);
+function handleBusMessage(m) {
+    if (m.seq != null) { if (m.seq <= state.lastSeq) return; state.lastSeq = m.seq; }
     if (m.type === 'log') logLine(m);
     else if (m.type === 'agent_actions') {
       const b = state.sc?.branches?.[m.branch_id];
@@ -105,8 +101,25 @@ function connectSSE() {
       if (state.sc && m.scenario_id === state.sc.id) refreshScenario();
       if (m.type === 'scenario_ready') loadScenarios();
     }
-  };
-  es.onerror = () => { /* browser retries */ };
+}
+
+function connectSSE() {
+  state.lastSeq = 0;
+  try {
+    const es = new EventSource('/api/events');
+    state.sse = es;
+    es.onmessage = ev => handleBusMessage(JSON.parse(ev.data));
+    es.onerror = () => { /* browser retries; polling covers the gap */ };
+  } catch (e) { /* no EventSource */ }
+  pollLog();
+}
+
+async function pollLog() {
+  try {
+    const r = await api(`/api/log?after=${state.lastSeq}`);
+    r.items.forEach(handleBusMessage);
+  } catch (e) { /* server busy/restarting */ }
+  setTimeout(pollLog, isActive() ? 2000 : 6000);
 }
 
 function logLine(m) {

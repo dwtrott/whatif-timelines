@@ -136,13 +136,17 @@ class LLM:
         delay = 2.0
         last_err: Exception | None = None
         key = id(payload)
-        self.inflight[key] = {"kind": kind, "started": time.time(), "stage": "queued (semaphore)", "attempt": 0}
+        # long generations need long read timeouts: ~12 tok/s worst case + slack
+        read_timeout = max(self.s.timeout, 40 + max_tokens * 0.09)
+        self.inflight[key] = {"kind": kind, "started": time.time(), "stage": "queued (semaphore)", "attempt": 0,
+                              "timeout_s": int(read_timeout)}
         try:
-            return await self._chat_loop(payload, kind, delay, last_err, key)
+            return await self._chat_loop(payload, kind, delay, last_err, key, read_timeout)
         finally:
             self.inflight.pop(key, None)
 
-    async def _chat_loop(self, payload, kind, delay, last_err, key):
+    async def _chat_loop(self, payload, kind, delay, last_err, key, read_timeout):
+        timeouts = 0
         for attempt in range(6):
             self.inflight[key]["attempt"] = attempt + 1
             async with self.sem:
@@ -152,7 +156,8 @@ class LLM:
                 t0 = time.monotonic()
                 try:
                     c = await self.client()
-                    post = asyncio.ensure_future(c.post(self.s.base_url + "chat/completions", headers=self._headers(), json=payload))
+                    post = asyncio.ensure_future(c.post(self.s.base_url + "chat/completions", headers=self._headers(),
+                                                        json=payload, timeout=httpx.Timeout(read_timeout, connect=20)))
                     waited = 0
                     while True:  # watchdog: announce slow calls instead of silently waiting
                         try:
@@ -163,11 +168,16 @@ class LLM:
                             if self.on_note:
                                 self.on_note(f"LLM call '{kind or 'chat'}' still waiting on {self.s.base_url} after {waited}s "
                                              f"(attempt {attempt + 1})")
-                            if waited >= self.s.timeout:
+                            if waited >= read_timeout:
                                 post.cancel()
                                 raise httpx.ReadTimeout(f"no response after {waited}s")
                 except (httpx.TimeoutException, httpx.TransportError) as e:
                     last_err = e
+                    if isinstance(e, httpx.TimeoutException):
+                        timeouts += 1
+                        if timeouts >= 2:  # a second full timeout means this request is too big/slow — give up fast
+                            raise LLMError(f"LLM '{kind}' timed out twice ({int(read_timeout)}s each) on {self.s.base_url}. "
+                                           f"Try a faster model or lower WHATIF_BRIEF_CHARS.") from e
                     log.warning("LLM transport error (%s), retry %d", e, attempt + 1)
                     if self.on_note:
                         self.on_note(f"LLM transport error ({type(e).__name__}); retry {attempt + 1}/6 in {delay:.0f}s")

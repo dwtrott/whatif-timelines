@@ -145,16 +145,23 @@ class Retriever:
             return p.get("extract", "") or "", p.get("fullurl", "")
         return "", ""
 
-    async def wiki_docs(self, titles: list[str], cutoff: date, want_latest: bool = True) -> list[Doc]:
+    async def wiki_docs(self, titles: list[str], cutoff: date, want_latest: bool = True,
+                        event_titles: list[str] | None = None) -> list[Doc]:
         docs: list[Doc] = []
         sem = asyncio.Semaphore(4)
 
-        async def one(title: str):
+        async def one(title: str, latest_only: bool = False):
             async with sem:
                 try:
                     canon = await self.wiki_exists(title)
                     if not canon:
                         log.info("no article for %r", title)
+                        return
+                    if latest_only:
+                        txt, url = await self.wiki_latest_text(canon)
+                        docs.append(Doc("wikipedia_latest", canon, txt[: self.s.max_chars_per_article * 3], url,
+                                        datetime.utcnow().date().isoformat(), False,
+                                        "event article (present-day); used only for the actual-history baseline"))
                         return
                     revid, ts, ok = await self.wiki_revision_asof(canon, cutoff)
                     latest_txt, latest_url = "", ""
@@ -179,7 +186,8 @@ class Retriever:
                 except Exception as e:  # noqa: BLE001
                     self._err(f"Wikipedia '{title}'", e)
 
-        await asyncio.gather(*(one(t) for t in titles))
+        await asyncio.gather(*(one(t) for t in titles),
+                             *((one(t, True) for t in (event_titles or [])) if want_latest else ()))
         return docs
 
     # ------------------------------------------------------------ gdelt
@@ -225,12 +233,13 @@ class Retriever:
 
     # ------------------------------------------------------------ bundle
     async def gather(self, topic: str, titles: list[str], cutoff: date, extra_queries: list[str] | None = None,
-                     user_docs: list[dict] | None = None, want_latest: bool = True) -> list[Doc]:
+                     user_docs: list[dict] | None = None, want_latest: bool = True,
+                     event_titles: list[str] | None = None) -> list[Doc]:
         docs: list[Doc] = []
         self.errors = []
         if not titles:
             self.errors.append("Wikipedia: no article titles to fetch (title suggestion step returned none)")
-        wiki_task = self.wiki_docs(titles, cutoff, want_latest=want_latest)
+        wiki_task = self.wiki_docs(titles, cutoff, want_latest=want_latest, event_titles=event_titles)
         queries = [topic] + [q for q in (extra_queries or []) if q and q != topic]
         gdelt_tasks = [self.gdelt(q, cutoff - timedelta(days=120), cutoff) for q in queries[:2]]
         results = await asyncio.gather(wiki_task, *gdelt_tasks, return_exceptions=True)

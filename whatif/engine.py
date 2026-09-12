@@ -39,6 +39,8 @@ class EventBus:
 
     def publish(self, msg: dict):
         msg.setdefault("ts", datetime.utcnow().isoformat(timespec="seconds"))
+        self.seq = getattr(self, "seq", 0) + 1
+        msg["seq"] = self.seq
         self.recent.append(msg)
         self.recent = self.recent[-300:]
         for q in list(self.subs):
@@ -119,10 +121,12 @@ class Engine:
                 self._log(sc, f"Title step done in {asyncio.get_event_loop().time() - t0:.1f}s")
                 sc.wiki_titles = [t for t in out.get("titles", []) if isinstance(t, str)][:self.s.max_wiki_articles + 2]
                 sc.wiki_titles = list(dict.fromkeys(sc.wiki_titles + (hint or [])[:2]))[: self.s.max_wiki_articles + 2]
+                sc.event_titles = [t for t in out.get("event_titles", []) if isinstance(t, str)][:4]
                 queries = [q for q in out.get("queries", []) if isinstance(q, str)][:3]
             else:
                 queries = []
-            self._log(sc, f"Reference set: {', '.join(sc.wiki_titles) or '(none found)'}")
+            self._log(sc, f"Reference set: {', '.join(sc.wiki_titles) or '(none found)'}"
+                          + (f" | event articles: {', '.join(sc.event_titles)}" if sc.event_titles else ""))
 
             # 2. retrieve as-of persona_cutoff + present-day
             self._log(sc, f"Retrieving Wikipedia revisions as of {persona_cutoff} and present-day text; GDELT headlines…")
@@ -167,6 +171,7 @@ class Engine:
             if sc.anchor_date < actual_end:
                 self._log(sc, f"Extracting the actual timeline {sc.anchor_date} → {actual_end} from present-day sources…")
                 latest = [d for d in docs if d.source in ("wikipedia_latest", "user")]
+                latest.sort(key=lambda d: 0 if "event article" in d.note else 1)  # event articles carry the most dated facts
                 share = max(4000, 40000 // max(1, len(latest)))
                 raw = "\n\n".join(f"### {d.title}\n{d.text[:share]}" for d in latest)
                 if not raw.strip():
@@ -227,7 +232,7 @@ class Engine:
         else:
             try:
                 docs = await self.retriever.gather(sc.title, sc.wiki_titles, cutoff, queries, sc.user_docs,
-                                                   want_latest=want_latest)
+                                                   want_latest=want_latest, event_titles=sc.event_titles)
             except Exception as e:  # noqa: BLE001
                 self._log(sc, f"Retrieval error: {e}", "warning")
                 docs = []
@@ -251,9 +256,11 @@ class Engine:
         if not raw.strip():
             raw = "(No reference material could be retrieved. Rely on well-established public knowledge as of the cutoff.)"
             flags.append("no retrieved material; model knowledge only")
-        out = await self.llm.json(P.GROUND_SYS, P.fill(P.GROUND_USER, 
-            cutoff=cutoff, title=sc.title, question=sc.question, premise_block=P.premise_block(premise), raw=raw[:60000]),
-            kind="ground", ctx={"topic": sc.title, "date": cutoff, "text": raw}, max_tokens=2600, temperature=0.3)
+        raw = raw[:34000]
+        self._log(sc, f"Leakage filter: {len(raw) // 1000}k chars of source material → briefing (this is the longest single model call, ~30-60s)")
+        out = await self.llm.json(P.GROUND_SYS, P.fill(P.GROUND_USER,
+            cutoff=cutoff, title=sc.title, question=sc.question, premise_block=P.premise_block(premise), raw=raw),
+            kind="ground", ctx={"topic": sc.title, "date": cutoff, "text": raw}, max_tokens=2000, temperature=0.3)
         briefing = out.get("briefing") or out.get("context") or ""
         if out.get("open_questions"):
             briefing += "\n\n**Open questions at the cutoff:** " + "; ".join(map(str, out["open_questions"]))
