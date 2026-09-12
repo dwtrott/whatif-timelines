@@ -84,6 +84,10 @@ class Branch:
     extra_personas: list[Persona] = field(default_factory=list)   # actors who entered during this branch
     retired: list[str] = field(default_factory=list)       # names who left the stage
     world_notes: str = ""                                  # causal-map notes (biggest uncertainties)
+    schedule: list[str] = field(default_factory=list)      # period end dates (adaptive: dense after the fork)
+    agent_state: dict = field(default_factory=dict)        # name -> {office, capital, credibility, pressure, priorities, grievances}
+    world_vars: dict = field(default_factory=dict)         # economy, approval, legislature control, war footing, media climate
+    hazards: dict = field(default_factory=dict)            # hazard_id -> {rolls, yes, last_p, question}
 
     def events_until(self, iso: str) -> list[Event]:
         return [e for e in self.events if e.date <= iso]
@@ -104,6 +108,7 @@ class Scenario:
     notes: str = ""               # analyst notes / priors about the actors (used in casting and all branches)
     wiki_titles: list[str] = field(default_factory=list)
     event_titles: list[str] = field(default_factory=list)
+    year_articles: list[str] = field(default_factory=list)   # "{year} in the United States" patterns
     user_docs: list[dict] = field(default_factory=list)
     personas: list[Persona] = field(default_factory=list)
     docs: list[dict] = field(default_factory=list)          # retrieved corpus (serialised Doc)

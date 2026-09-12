@@ -185,9 +185,14 @@ function renderSidebar() {
       ${p != null ? `<div class="sub">p ≈ ${Math.round(p * 100)}% · ${b.events.length} events${b.report.converges ? ' · converges' : ''}</div>` : ''}
     </div>`;
   }).join('');
-  $('#agentCount').textContent = sc.personas.length;
+  const laneSel = state.sel?.type === 'branch' ? sc.branches[state.sel.id] : null;
+  const castList = laneSel ? [...sc.personas.filter(p => !(laneSel.retired || []).includes(p.name)), ...(laneSel.extra_personas || [])] : sc.personas;
+  $('#agentCount').textContent = castList.length + (laneSel ? ' on lane' : '');
   const dstat = p => p.dossier_status === 'researching' ? '<span class="status running">researching…</span>' : p.dossier_status === 'done' ? `<span class="status completed" title="evidence-backed dossier">${(p.dossier?.sources || []).length} src</span>` : p.dossier_status === 'failed' ? '<span class="status failed">no dossier</span>' : '';
-  al.innerHTML = sc.personas.map(p => `<div class="item ${state.sel?.type === 'persona' && state.sel.id === p.id ? 'active' : ''}" onclick="showPersona('${p.id}')"><div class="t"><span class="name">${esc(p.name)}</span><span class="spacer"></span>${dstat(p)}</div><div class="sub" style="margin-left:0">${esc(p.role)}</div></div>`).join('') || '<div class="muted small">casting…</div>';
+  const stateTag = p => { const st = laneSel?.agent_state?.[p.name]; return st ? `<span class="muted" title="capital / credibility / pressure"> · cap ${Number(st.capital).toFixed(2)} · pr ${Number(st.pressure).toFixed(2)}</span>` : ''; };
+  const entered = new Set((laneSel?.extra_personas || []).map(p => p.id));
+  al.innerHTML = castList.map(p => `<div class="item ${state.sel?.type === 'persona' && state.sel.id === p.id ? 'active' : ''}" onclick="showPersona('${p.id}')"><div class="t"><span class="name">${entered.has(p.id) ? '＋ ' : ''}${esc(p.name)}</span><span class="spacer"></span>${dstat(p)}</div><div class="sub" style="margin-left:0">${esc(laneSel?.agent_state?.[p.name]?.office || p.role)}${stateTag(p)}</div></div>`).join('') || '<div class="muted small">casting…</div>';
+  if (laneSel && (laneSel.retired || []).length) al.insertAdjacentHTML('beforeend', `<div class="muted small" style="padding:4px 8px">left the stage: ${esc(laneSel.retired.join(', '))}</div>`);
   $('#docCount').textContent = sc.docs.length;
   const label = {wikipedia_asof: 'wiki as-of', wikipedia_latest: 'wiki today', gdelt: 'gdelt', user: 'seed'};
   dl.innerHTML = sc.docs.slice(0, 60).map(d => `<div class="item" style="padding:4px 8px" title="${esc(d.note)}">
@@ -499,7 +504,10 @@ function renderBranchDetail(box) {
         ${r.convergence_note ? `<p class="small muted">${esc(r.convergence_note)}</p>` : ''}
       </div>` : ''}
     ${b.report?.aggregate ? aggregateHTML(b.report.aggregate) : (b.run_group ? `<div class="dsec small muted">Part of a ${Object.values(sc.branches).filter(x => x.run_group === b.run_group).length}-run Monte Carlo group — the aggregate appears here when all runs finish. <button class="ghost small" onclick="runAggregate('${b.run_group}')">aggregate now</button></div>` : '')}
-    ${b.junctures?.length ? `<div class="dsec"><h4>Junctures rolled (${b.junctures.length})</h4>${b.junctures.map(j => `<div class="agentAct"><div class="who"><span class="mono muted">${j.date}</span> ${esc(j.question)}</div><div><span class="tag">p(yes) ${j.p_yes}</span> <span class="tag">rolled ${j.roll}</span> → <b style="color:${j.outcome === 'yes' ? 'var(--ok)' : 'var(--warn)'}">${j.outcome.toUpperCase()}</b> · ${esc(j.headline)}</div></div>`).join('')}</div>` : ''}
+    ${b.world_vars && Object.keys(b.world_vars).length ? `<div class="dsec"><h4>World variables (end of run)</h4><div class="kv">${Object.entries(b.world_vars).map(([k, v]) => `<b>${esc(k.replace(/_/g, ' '))}</b><span>${esc(String(v))}</span>`).join('')}</div></div>` : ''}
+    ${b.report?.calibration ? calibrationHTML(b.report.calibration) : (b.parent_branch_id && b.status === 'completed' && sc.baseline_branch_id ? `<div class="dsec"><h4>Calibration</h4><div class="small muted">Score this run's junctures and events against what really happened in the same window (meaningful for plain forecasts; premise-dependent items are marked n/a).</div><button class="small" style="margin-top:6px" onclick="runCalibrate('${b.id}')">score vs. actual history</button></div>` : '')}
+    ${b.hazards && Object.keys(b.hazards).length ? `<div class="dsec"><h4>Recurring hazards</h4>${Object.entries(b.hazards).map(([k, h]) => `<div class="small"><span class="tag">${esc(k)}</span> ${esc(h.question || '')} — rolled ${h.rolls}×, ${h.yes} yes, last p ${h.last_p}</div>`).join('')}</div>` : ''}
+    ${b.junctures?.length ? `<div class="dsec"><h4>Junctures rolled (${b.junctures.length})</h4>${b.junctures.map(j => `<div class="agentAct"><div class="who"><span class="mono muted">${j.date}</span> ${esc(j.question)}</div><div><span class="tag">p(yes) ${j.p_yes}</span> <span class="tag">rolled ${j.roll}</span> → <b style="color:${j.outcome === 'yes' ? 'var(--ok)' : 'var(--warn)'}">${j.outcome.toUpperCase()}</b> · ${esc(j.headline)}</div>${j.base_rate_note ? `<div class="small muted">base rate: ${esc(j.base_rate_note)}</div>` : ''}</div>`).join('')}</div>` : ''}
     ${b.causal_map?.length ? `<div class="dsec"><h4>Causal map of real post-fork events</h4><div class="small muted" style="margin-bottom:6px">${esc(b.world_notes || '')}</div>${b.causal_map.map(c => `<div class="small" style="margin:4px 0"><span class="mono muted">${c.date}</span> <span class="tag" style="color:${c.verdict === 'independent' ? 'var(--ok)' : c.verdict === 'dependent' ? 'var(--bad)' : 'var(--warn)'}">${c.verdict}${c.verdict !== 'dependent' ? ' p=' + Number(c.p).toFixed(2) : ''}</span> ${esc(c.headline)}<div class="muted" style="margin-left:8px">${esc(c.rationale)}${c.interceptable_by?.length ? ' · interceptable by ' + esc(c.interceptable_by.join(', ')) : ''}${c.resolved ? ' · resolved' : ''}</div></div>`).join('')}</div>` : ''}
     ${b.structural?.length ? `<div class="dsec"><details><summary class="muted small">Structural calendar (${b.structural.length})</summary>${b.structural.map(x => `<div class="small" style="margin:3px 0"><span class="mono muted">${x.date}</span> <span class="tag">${esc(x.kind)}</span> ${esc(x.event)}${x.actor ? ' · ' + esc(x.actor) : ''} <span class="muted">${esc(x.note)}</span></div>`).join('')}</details></div>` : ''}
     ${(b.extra_personas?.length || b.retired?.length) ? `<div class="dsec"><h4>Cast changes</h4>${(b.extra_personas || []).map(p => `<div class="small">＋ <b>${esc(p.name)}</b> — ${esc(p.role)}</div>`).join('')}${(b.retired || []).map(n => `<div class="small muted">− ${esc(n)} left the stage</div>`).join('')}</div>` : ''}
@@ -526,6 +534,20 @@ function aggregateHTML(a) {
     ${(a.decisive_junctures || []).length ? `<h4 style="margin-top:8px">Decisive junctures</h4><ul class="md">${a.decisive_junctures.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
     ${(a.per_run || []).length ? `<details><summary class="muted small">per run</summary>${a.per_run.map(r => `<div class="small" style="margin:3px 0"><b>${esc(r.run)}</b> — ${esc(r.one_line)} <span class="muted">${esc(Object.entries(r.answers || {}).map(([k, v]) => v).join(' / '))}</span></div>`).join('')}</details>` : ''}
   </div>`;
+}
+
+function calibrationHTML(c) {
+  return `<div class="dsec"><h4>Calibration vs. actual history</h4>
+    <div class="row"><span class="tag">Brier ${c.brier ?? 'n/a'} (${c.n_scored_junctures} junctures; 0 = perfect, 0.25 = coin flip)</span><span class="tag">event hit rate ${c.event_hit_rate ?? 'n/a'}</span><span class="tag">to ${esc(c.window_end || '')}</span></div>
+    <div class="md"><p>${esc(c.summary || '')}</p></div>
+    ${(c.systematic_biases || []).length ? `<ul class="md">${c.systematic_biases.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+    <details><summary class="muted small">per juncture / event</summary>${(c.junctures || []).map(j => `<div class="small"><span class="tag">${esc(j.actual)}</span> p=${j.p_yes} · ${esc(j.question)} <span class="muted">${esc(j.note || '')}</span></div>`).join('')}${(c.events || []).map(e => `<div class="small"><span class="tag">${esc(e.actual)}</span> ${esc(e.headline)} <span class="muted">${esc(e.note || '')}</span></div>`).join('')}</details></div>`;
+}
+
+async function runCalibrate(bid) {
+  toast('scoring against actual history…');
+  try { await api(`/api/scenarios/${state.sc.id}/branches/${bid}/calibrate`, 'POST'); await refreshScenario(); }
+  catch (e) { alert(e.message); }
 }
 
 async function runAggregate(group) {
@@ -587,9 +609,12 @@ async function doCompare(bid) {
 const PERSONA_FIELDS = [['name', 'Name'], ['role', 'Role'], ['goals', 'Goals (ranked)'], ['stance', 'Stance'], ['style', 'Style under pressure'],
   ['resources', 'Levers'], ['background', 'Track record'], ['playbook', 'Playbook'], ['relationships', 'Relationships'], ['red_lines', 'Red lines']];
 
+function findPersona(pid) {
+  return state.sc.personas.find(x => x.id === pid) || Object.values(state.sc.branches).flatMap(b => b.extra_personas || []).find(x => x.id === pid);
+}
 function showPersona(pid, edit = false) {
   const p = pid === 'new' ? {id: 'new', name: '', role: '', goals: '', stance: '', style: '', resources: '', background: '', playbook: '', relationships: '', red_lines: ''}
-    : state.sc.personas.find(x => x.id === pid);
+    : findPersona(pid);
   if (!p) return;
   state.sel = {type: 'persona', id: pid};
   const box = $('#detailBody');

@@ -261,6 +261,13 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
         except KeyError as e:
             raise HTTPException(404, str(e))
 
+    @app.post("/api/scenarios/{sid}/branches/{bid}/calibrate")
+    async def calibrate(sid: str, bid: str):
+        try:
+            return await engine.calibrate(sid, bid)
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+
     @app.get("/api/scenarios/{sid}/compare")
     async def compare(sid: str, a: str, b: str):
         try:

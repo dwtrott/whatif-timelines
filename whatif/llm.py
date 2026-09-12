@@ -423,6 +423,10 @@ def mock_response(kind: str, messages: list[dict], ctx: dict) -> str:
         return _json.dumps({"outcome_questions": ["Did the crisis escalate?"], "per_run": [{"run": f"run {i+1}", "answers": {"Did the crisis escalate?": "yes" if i % 2 == 0 else "no"}, "one_line": "mock"} for i in range(n)],
                             "frequencies": {"Did the crisis escalate?": {"yes": (n + 1) // 2, "no": n // 2, "partial": 0}},
                             "summary": "Mock aggregate summary.", "decisive_junctures": ["the election roll"]})
+    if kind == "calibrate":
+        return _json.dumps({"junctures": [{"question": "mock", "p_yes": 0.4, "actual": "no", "note": "mock"}],
+                            "events": [{"headline": "mock", "actual": "partly", "note": "mock"}],
+                            "systematic_biases": ["mock bias"], "summary": "mock calibration summary"})
     if kind == "research_plan":
         return _json.dumps({"is_individual": True, "wikipedia_titles": [ctx.get("name", "")], "queries": [], "own_domains": []})
     if kind == "evidence":

@@ -192,6 +192,29 @@ class Retriever:
                              *(one(t, latest_only=want_latest) for t in (event_titles or []) if t not in titles))
         return docs
 
+    async def wiki_year_articles(self, patterns: list[str], years: list[int], max_chars: int = 14000) -> list[Doc]:
+        """Present-day year articles ("2003 in the United States") — dense dated facts for the actual timeline only."""
+        docs: list[Doc] = []
+        sem = asyncio.Semaphore(4)
+
+        async def one(pattern: str, year: int):
+            title = pattern.replace("{year}", str(year))
+            async with sem:
+                try:
+                    canon = await self.wiki_exists(title)
+                    if not canon:
+                        return
+                    txt, url = await self.wiki_latest_text(canon)
+                    if len(txt) > 500:
+                        docs.append(Doc("wikipedia_year", canon, txt[:max_chars], url, datetime.utcnow().date().isoformat(), False,
+                                        "year article (present-day); used only for the actual-history baseline", {"year": year}))
+                except Exception as e:  # noqa: BLE001
+                    log.info("year article failed for %r: %s", title, e)
+
+        await asyncio.gather(*(one(p, y) for p in patterns[:2] for y in years))
+        docs.sort(key=lambda d: (d.meta.get("year", 0), d.title))
+        return docs
+
     # ------------------------------------------------------------ gdelt
     async def gdelt(self, query: str, start: date, end: date, max_records: int | None = None) -> list[Doc]:
         """Headlines between start and end (inclusive). GDELT DOC covers 2017-01-01 onward."""

@@ -4,7 +4,7 @@ ARTICLES_SYS = """You are a research librarian preparing a briefing corpus for a
 Given a scenario, choose English Wikipedia articles. Use exact, existing titles.
 
 Return JSON:
-{"titles": ["..."], "event_titles": ["..."], "queries": ["..."]}
+{"titles": ["..."], "event_titles": ["..."], "queries": ["..."], "year_articles": ["{year} in the United States"]}
 
 - "titles" (6-8): BACKGROUND that existed before the period — the specific organisations, people, institutions,
   places and prior events involved (e.g. "OpenAI", "Sam Altman", "Microsoft", "Ilya Sutskever", "Helen Toner").
@@ -13,7 +13,10 @@ Return JSON:
 - "event_titles" (1-4): articles ABOUT what happened during the period itself, if such articles exist
   (e.g. "Removal of Sam Altman from OpenAI", "Bankruptcy of Lehman Brothers", "2016 United Kingdom European Union
   membership referendum"). These are used only to reconstruct the actual timeline.
-- "queries" (2): 2-4 word news search phrases."""
+- "queries" (2): 2-4 word news search phrases.
+- "year_articles" (1-2): Wikipedia year-article title PATTERNS with {year} as placeholder, for the region/domain
+  that matters, used to reconstruct a dense real timeline — e.g. "{year} in the United States", "{year} in the
+  United Kingdom", "{year} in science", "{year}" (world). Most relevant first."""
 
 ARTICLES_USER = """Scenario title: {title}
 Question being studied: {question}
@@ -52,13 +55,16 @@ material. Extract the significant, verifiable events in the requested date windo
 Return JSON: {"events": [{"date": "YYYY-MM-DD", "headline": "<= 12 words", "summary": "1-3 sentences",
 "actors": ["..."], "category": "political|economic|security|media|legal|social|technology|other",
 "importance": 1-5}]}
-- 10 to 30 events, chronological, dates as precise as the material allows (use the 1st of the month if only the month is known).
+- 12 to 30 events for this window, chronological, dates as precise as the material allows (1st of the month if only
+  the month is known). Prefer events with consequences: decisions, elections, attacks, disasters, crises, deaths of
+  major figures, landmark laws/rulings, technology and market shocks, wars starting/ending.
 - Cover ALL domains that mattered in the window (politics, economy, security, technology, society, foreign affairs),
   not only the ones related to the analyst's question — the question says what to measure, not what happened.
 - Only events inside the window. No speculation. If the material does not cover the window, return fewer events."""
 
-ACTUAL_USER = """Window: {start} to {end}
-Scenario: {title} — {question}
+ACTUAL_USER = """Window: {start} to {end}  (extract ONLY events inside this window)
+Scenario: {title}
+Analyst's interest (what will be measured later — do NOT restrict extraction to it): {question}
 
 Material:
 {raw}"""
@@ -115,10 +121,18 @@ WHO YOU ARE
 - Relationships in this cast: {relationships}
 - Red lines: {red_lines}
 
+YOUR CURRENT SITUATION (changes every period; take it seriously)
+{state_block}
+
 HOW TO PLAY IT
 - Act as THIS person would, given that track record — including bold, self-interested, retaliatory, or norm-breaking
   moves when they are in character. Do not default to the cautious institutional option; people rarely do when
   their position or reputation is on the line.
+- Human regularities apply to you: when you are LOSING (low capital, high pressure, recent humiliation) you take
+  bigger risks and look for someone to blame or a dramatic reset; when you are WINNING you consolidate and avoid
+  unnecessary fights; public commitments are hard to walk back (escalation of commitment); grievances seek payback;
+  attention is scarce — you respond to the most salient thing that happened to YOU this period, not to everything;
+  if a move has failed twice you change approach; offices and mandates constrain what you can do.
 - Be concrete. Not "engages stakeholders" but "calls Nadella at 6am and offers to bring 500 engineers", not
   "issues a statement" but the actual words. Name who you call, what you offer, what you threaten, what you sign,
   what you leak.
@@ -143,6 +157,7 @@ YOUR MEMORY / RUNNING NOTES:
 {memory}
 
 CURRENT WORLD STATE ({date}): {world_state}
+WORLD VARIABLES: {world_vars}
 {exogenous_block}
 YOUR OWN RECENT MOVES (do not repeat a move unless it worked and the situation still calls for it):
 {past_actions}
@@ -166,8 +181,23 @@ Adjudication principles:
   terms end; people leave office and successors appear.
 - CONTINGENT OUTCOMES ARE ROLLED, NOT CHOSEN. For every pivotal uncertain outcome this period (a contingent exogenous
   event, an election, whether a plot is intercepted, whether a deal closes), output a JUNCTURE with your honest
-  probability and BOTH outcomes described. The engine rolls dice; you do not decide which happens. Calibrate: use
-  base rates and the specific situation; avoid 0.5 as a default.
+  probability and BOTH outcomes described. The engine rolls dice; you do not decide which happens.
+- CALIBRATE AGAINST REFERENCE CLASSES. Every juncture carries a base_rate_note: the real-world frequency of this
+  kind of outcome (e.g. "large-scale terrorist attacks on US soil succeeded 0 times in 2002-2024 despite continual
+  plotting"; "incumbent parties lost the White House after 8 years in most post-war cycles"). Your p must be
+  reconcilable with it. RECURRING HAZARDS (the same kind of risk period after period) get a stable hazard_id; look
+  at the JUNCTURE HISTORY — a hazard that has already been rolled several times must not be rolled again at an
+  unchanged probability: capability degrades or adapts, defenders learn, attention moves. Per-period probabilities
+  must be consistent with the period length and the cumulative record; never re-ask a question that was already
+  resolved. Date each juncture at the day it would actually be decided, not the period end.
+- ELECTIONS AND SUCCESSION follow the WORLD VARIABLES (approval, economy, war footing, legislature control) and the
+  candidates on stage; name the candidates and the result.
+- NEWS VALUE. An action that adds no new information (another media series, another hearing on the same matter,
+  another statement) produces NO event — mention it in world_state as background noise at most. Events are things
+  that change someone's options.
+- BEYOND THE LAST REAL EVENT (future periods with no exogenous list) the world still produces shocks: consider
+  base-rate exogenous surprises — recession (~1 per decade), major disaster, foreign crisis, pandemic, technology
+  discontinuity — as junctures with honest low probabilities.
 - Consequences are SPECIFIC: named people resign, sign, sue, defect, get hired; named firms/agencies act; numbers where
   they matter. Never "scrutiny increases" or "trust erodes" without the actor and the act.
 - REPETITION IS FAILURE. If the last periods were press conference / hearing / statement cycles, the world has moved
@@ -181,8 +211,14 @@ Return JSON:
   "category": "political|economic|security|media|legal|social|technology|corporate|foreign|other",
   "confidence": 0.0-1.0, "divergence": 0.0-1.0, "importance": 1-5,
   "exogenous": true/false (true if this is an independent real-world event playing out)}],
- "junctures": [{"question": "what is uncertain", "p_yes": 0.0-1.0, "if_yes": {"headline": "...", "summary": "..."},
-  "if_no": {"headline": "...", "summary": "..."}, "importance": 1-5, "actors": ["..."]}],
+ "junctures": [{"date": "YYYY-MM-DD (within this period)", "question": "what is uncertain", "p_yes": 0.0-1.0,
+  "base_rate_note": "reference-class frequency in one sentence", "hazard_id": "stable_snake_case_id or empty",
+  "if_yes": {"headline": "...", "summary": "..."}, "if_no": {"headline": "...", "summary": "..."},
+  "importance": 1-5, "actors": ["..."]}],
+ "world_vars": {"economy": "short phrase", "approval_head_of_government": 0-1, "legislature_control": "short phrase",
+  "war_footing": "short phrase", "media_climate": "short phrase", "public_mood": "short phrase"},
+ "actor_updates": {"<persona name>": {"office": "current office/role", "capital": 0-1, "credibility": 0-1,
+  "pressure": 0-1, "priorities": ["top 3 now"], "grievance": "new grievance if any, else empty"}},
  "new_actors": [{"name": "real person or precise office", "role": "...", "why_now": "..."}],
  "exits": ["name of actor who leaves the stage this period, with no further agency"],
  "world_state": "3-4 sentences: balance of power and the main open issues at the end of the period",
@@ -201,13 +237,19 @@ TIMELINE SO FAR ON THIS BRANCH ({elapsed} since the fork):
 {timeline}
 
 {exogenous_block}
+WORLD VARIABLES AT START OF PERIOD: {world_vars}
+
+JUNCTURE HISTORY (already rolled — do not re-ask; update hazards, do not reset them):
+{juncture_history}
+
 {parent_block}
-CAST CURRENTLY ON STAGE: {cast}
+CAST CURRENTLY ON STAGE (with current state): 
+{cast}
 
 ACTIONS THIS PERIOD ({date}):
 {actions}
 
-Adjudicate the period {prev} → {date}."""
+Adjudicate the period {prev} → {date} ({period_len}). Date events and junctures at the day they happen."""
 
 
 REPORT_SYS = """You are the lead analyst writing up one branch of a counterfactual forecasting simulation for a
@@ -460,3 +502,29 @@ Premise shared by all runs: {premise}
 
 RUNS:
 {runs}"""
+
+
+
+# ====================================================================== calibration
+CALIBRATE_SYS = """You score a simulation run against what ACTUALLY happened, to measure calibration. You are given the
+run's junctures (each with the simulation's probability p_yes and the rolled outcome) and its events, plus the real
+timeline for the same window. For each juncture, decide what really happened: "yes", "no", or "unknown" (if the
+question does not map to a real outcome, e.g. it concerns a counterfactual office-holder). For each simulated event,
+judge whether something like it really happened: "yes", "partly", "no", or "n/a" (premise-dependent).
+Return JSON: {"junctures": [{"question": "...", "p_yes": 0.0, "actual": "yes|no|unknown", "note": "..."}],
+"events": [{"headline": "...", "actual": "yes|partly|no|n/a", "note": "..."}],
+"systematic_biases": ["patterns: e.g. over-predicts dramatic attacks; under-predicts institutional inertia"],
+"summary": "3-5 sentences on how well this run tracked reality and where it diverged for reasons other than the premise"}"""
+
+CALIBRATE_USER = """Scenario: {title}
+Branch: {name} — premise: {premise}
+Window: {start} → {end}
+
+SIMULATED JUNCTURES:
+{junctures}
+
+SIMULATED EVENTS:
+{events}
+
+REAL TIMELINE FOR THE WINDOW:
+{actual}"""

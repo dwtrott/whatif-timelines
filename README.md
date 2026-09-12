@@ -26,8 +26,10 @@ in **Google Colab** on `localhost`, with **any OpenAI-compatible model** — an 
    cited, with a confidence, a gaps list and a leakage/unsupported-claims critic pass. The dossier digest rides in every
    agent prompt. (Rationale: Park et al. 2024 — agents built from rich first-person material replicate real people's
    behaviour at ~85% normalized accuracy; agents built from short persona paragraphs do markedly worse.)
-4. **Baseline.** Real events between your anchor date and today are extracted onto the grey *Actual history* lane.
-   If the horizon is in the future, a *Baseline forecast* lane starts automatically from today.
+4. **Baseline.** A dense real timeline between your anchor date and today is extracted onto the grey *Actual history*
+   lane — from the topic and event articles plus Wikipedia **year articles** ("2003 in the United States"), in ≤2-year
+   windows, all domains — so the causal map has the whole world to classify, not just the topic. If the horizon is in
+   the future, a *Baseline forecast* lane starts automatically from today.
 5. **Fork.** Click any event → *What if…* → new lane. Before the first round the engine builds a **causal map**: every
    real event after the fork on the parent lane is classified *independent* (still happens unless a named actor
    intercepts it), *dependent* (falls away with the premise) or *contingent* (probability p), plus a **structural
@@ -36,8 +38,15 @@ in **Google Colab** on `localhost`, with **any OpenAI-compatible model** — an 
    it must resolve the exogenous and structural events due that period, state **junctures** with explicit
    probabilities and both outcomes — **the engine rolls seeded dice**, the model does not get to choose — bring in
    **new actors** and retire departing ones, score **divergence** from the parent lane, and update indicators and
-   memories. Fork ×N for a **Monte Carlo** group: the runs differ by seed and an aggregate codes the outcome question
-   across them ("attack on US soil by end-2001: 6/8 runs"). Branches can be forked from branches.
+   memories. Periods are **adaptive** — days right after the fork, doubling to months, then uniform — so consequences
+   unfold at the right grain. Every actor carries a **psychological state** (office, capital, credibility, pressure,
+   priorities, grievances) that the arbiter updates and that drives prospect-theory behaviour (losing → risk-seeking,
+   winning → consolidation, commitments stick, grievances seek payback). Persistent **world variables** (economy,
+   approval, legislature control, war footing, media climate) feed elections and succession. **Recurring hazards** are
+   tracked: every juncture carries a base-rate note and a hazard id; the engine refuses silent probability creep and
+   damps a hazard after repeated hits. Fork ×N for a **Monte Carlo** group: runs differ by seed and an aggregate codes
+   the outcome question across them. **Score vs. actual history** gives a Brier score on junctures with known real
+   outcomes and an event hit-rate, plus the run's systematic biases. Branches can be forked from branches.
 6. **Analyse.** Each finished lane gets a report: narrative, mechanism, probability estimate, key divergences,
    signposts, the assumptions it rests on, whether it converges back to the parent. **Interview** any agent inside any
    lane; **compare** two lanes.

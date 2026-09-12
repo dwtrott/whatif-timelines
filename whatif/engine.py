@@ -9,6 +9,7 @@ import asyncio
 import logging
 import math
 import random
+import re
 import traceback
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -126,6 +127,8 @@ class Engine:
                 if not sc.wiki_titles:  # model gave nothing usable — fall back to the keyword search
                     sc.wiki_titles = (hint or [sc.title])[: self.s.max_wiki_articles]
                 sc.event_titles = [t for t in out.get("event_titles", []) if isinstance(t, str)][:4]
+                sc.year_articles = [t for t in out.get("year_articles", []) if isinstance(t, str) and "{year}" in t][:2] \
+                    or ["{year} in the United States"]
                 queries = [q for q in out.get("queries", []) if isinstance(q, str)][:3]
             else:
                 queries = []
@@ -159,25 +162,7 @@ class Engine:
             self.store.save(sc)
 
             if sc.anchor_date < actual_end:
-                self._log(sc, f"Extracting the actual timeline {sc.anchor_date} → {actual_end} from present-day sources…")
-                latest = [d for d in docs if d.source in ("wikipedia_latest", "user")]
-                latest.sort(key=lambda d: 0 if "event article" in d.note else 1)  # event articles carry the most dated facts
-                share = max(4000, 40000 // max(1, len(latest)))
-                raw = "\n\n".join(f"### {d.title}\n{d.text[:share]}" for d in latest)
-                if not raw.strip():
-                    raw = "(no reference material retrieved; use your own knowledge of the period and say so in summaries if unsure)"
-                dates = sc.dates_for(sc.anchor_date, min(8, sc.rounds_between(sc.anchor_date, actual_end)))
-                out = await self.llm.json(P.ACTUAL_SYS, P.fill(P.ACTUAL_USER, 
-                    start=sc.anchor_date, end=actual_end, title=sc.title, question=sc.question, raw=raw),
-                    kind="actual_events", ctx={"dates": dates, "topic": sc.title, "seed": sc.id}, max_tokens=3000, strong=True)
-                for i, e in enumerate(out.get("events", [])):
-                    d = _safe_date(e.get("date"), sc.anchor_date, actual_end)
-                    if not d:
-                        continue
-                    base.events.append(Event(id=new_id("ev"), branch_id=base.id, date=d, headline=str(e.get("headline", ""))[:140],
-                                             summary=str(e.get("summary", "")), actors=_strlist(e.get("actors")),
-                                             category=str(e.get("category", "")), kind="actual", confidence=1.0,
-                                             divergence=0.0, importance=_int(e.get("importance"), 3), round=i))
+                base.events.extend(await self._extract_actual(sc, base, docs, sc.anchor_date, actual_end))
                 base.events.sort(key=lambda e: e.date)
                 self._log(sc, f"Actual timeline: {len(base.events)} events.")
             else:
@@ -211,6 +196,73 @@ class Engine:
             self._log(sc, f"Preparation failed: {sc.error}", "error")
             log.error(traceback.format_exc())
             self.store.save(sc)
+
+    async def _extract_actual(self, sc: Scenario, base: Branch, docs: list[Doc], start: str, end: str) -> list[Event]:
+        """Dense real timeline: topic/event articles + Wikipedia year articles, extracted per ≤2-year chunk."""
+        y0, y1 = int(start[:4]), int(end[:4])
+        years = list(range(y0, y1 + 1))
+        year_docs: list[Doc] = []
+        if not self.llm.is_mock and sc.year_articles and len(years) <= 40:
+            self._log(sc, f"Fetching {len(years)} year article(s) per pattern ({', '.join(sc.year_articles)}) for the real timeline…")
+            try:
+                year_docs = await self.retriever.wiki_year_articles(sc.year_articles, years)
+            except Exception as e:  # noqa: BLE001
+                self._log(sc, f"Year articles failed: {e}", "warning")
+            self._log(sc, f"{len(year_docs)} year articles retrieved.")
+        topic_docs = [d for d in docs if d.source in ("wikipedia_latest", "user")]
+        topic_docs.sort(key=lambda d: 0 if "event article" in d.note else 1)
+        # chunk the window into <=2-year pieces (max 14 chunks)
+        chunks: list[tuple[str, str]] = []
+        cur = date.fromisoformat(start)
+        end_d = date.fromisoformat(end)
+        span_years = max(1, min(2, math.ceil((y1 - y0 + 1) / 14)))
+        while cur < end_d:
+            nxt = min(end_d, date(cur.year + span_years, 1, 1) - timedelta(days=1)) if span_years else end_d
+            if nxt <= cur:
+                nxt = end_d
+            chunks.append((cur.isoformat(), nxt.isoformat()))
+            cur = nxt + timedelta(days=1)
+        self._log(sc, f"Extracting the actual timeline {start} → {end} in {len(chunks)} window(s)…")
+
+        async def one(c_start: str, c_end: str) -> list[Event]:
+            ys = set(range(int(c_start[:4]), int(c_end[:4]) + 1))
+            mats = [d for d in year_docs if d.meta.get("year") in ys]
+            share_topic = max(2500, 16000 // max(1, len(topic_docs)))
+            raw = "\n\n".join(f"### {d.title}\n{d.text}" for d in mats)
+            raw += "\n\n" + "\n\n".join(f"### {d.title}\n{d.text[:share_topic]}" for d in topic_docs[:6])
+            raw = raw.strip()[:70000] or "(no reference material retrieved; use well-established public knowledge of the period)"
+            out = await self.llm.json(P.ACTUAL_SYS, P.fill(P.ACTUAL_USER, start=c_start, end=c_end, title=sc.title,
+                                                              question=sc.question, raw=raw),
+                                      kind="actual_events", ctx={"dates": sc.dates_for(c_start, 6, max(7, (date.fromisoformat(c_end) - date.fromisoformat(c_start)).days // 7)),
+                                                                 "topic": sc.title, "seed": sc.id + c_start}, max_tokens=3600, strong=True)
+            evs = []
+            for e in out.get("events", []):
+                d = _safe_date(e.get("date"), c_start, c_end)
+                if not d or not isinstance(e, dict):
+                    continue
+                evs.append(Event(id=new_id("ev"), branch_id=base.id, date=d, headline=str(e.get("headline", ""))[:140],
+                                 summary=str(e.get("summary", "")), actors=_strlist(e.get("actors")),
+                                 category=str(e.get("category", "")), kind="actual", confidence=1.0, divergence=0.0,
+                                 importance=_int(e.get("importance"), 3), round=0,
+                                 sources=[d_.title for d_ in mats[:2]]))
+            return evs
+
+        results = await asyncio.gather(*(one(a, b) for a, b in chunks), return_exceptions=True)
+        events: list[Event] = []
+        for r in results:
+            if isinstance(r, list):
+                events.extend(r)
+            else:
+                self._log(sc, f"actual-timeline chunk failed: {r}", "warning")
+        # dedupe near-identical headlines on the same month
+        seen, out = set(), []
+        for e in sorted(events, key=lambda e: e.date):
+            key = (e.date[:7], _norm(e.headline)[:40])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(e)
+        return out[:400]
 
     async def _cast(self, sc: Scenario, briefing: str, cutoff: str, n: int, timeline_txt: str = "",
                     extra_notes: str = "") -> list[Persona]:
@@ -252,7 +304,14 @@ class Engine:
         return sc.personas
 
     # ------------------------------------------------------------------ dossiers
-    def start_research(self, sid: str, persona_ids: list[str] | None = None, depth: str | None = None) -> int:
+    def _all_personas(self, sc: Scenario, branch_id: str | None = None) -> list[Persona]:
+        ps = list(sc.personas)
+        if branch_id and branch_id in sc.branches:
+            ps += sc.branches[branch_id].extra_personas
+        return ps
+
+    def start_research(self, sid: str, persona_ids: list[str] | None = None, depth: str | None = None,
+                       branch_id: str | None = None, cutoff: str | None = None) -> int:
         """Build evidence-backed dossiers in the background for personas that lack one (or the given ids)."""
         sc = self.store.get(sid)
         if not sc:
@@ -260,7 +319,8 @@ class Engine:
         depth = depth or self.s.research_depth
         if depth == "off":
             return 0
-        todo = [p for p in sc.personas if (persona_ids and p.id in persona_ids) or
+        pool = self._all_personas(sc, branch_id)
+        todo = [p for p in pool if (persona_ids and p.id in persona_ids) or
                 (not persona_ids and not p.dossier and p.dossier_status != "researching")]
         if not todo:
             return 0
@@ -268,22 +328,23 @@ class Engine:
             p.dossier_status = "researching"
         self.store.save(sc)
         key = f"research:{sid}:{datetime.utcnow().timestamp()}"
-        self.tasks[key] = asyncio.create_task(self._research_many(sid, [p.id for p in todo], depth), name=key)
+        self.tasks[key] = asyncio.create_task(self._research_many(sid, [p.id for p in todo], depth, branch_id, cutoff), name=key)
         return len(todo)
 
-    async def _research_many(self, sid: str, pids: list[str], depth: str):
+    async def _research_many(self, sid: str, pids: list[str], depth: str, branch_id: str | None = None,
+                             cutoff: str | None = None):
         sc = self.store.get(sid)
         if not sc:
             return
         # profile as of the anchor (start of the story); forks later in the story inherit the branch timeline anyway
-        cutoff = min(sc.anchor_date, date.today().isoformat())
+        cutoff = cutoff or min(sc.anchor_date, date.today().isoformat())
         researcher = Researcher(self.s, self.llm, self.retriever,
                                 log_fn=lambda msg, level="info": self._log(sc, msg, level))
         sem = asyncio.Semaphore(3)
         self._log(sc, f"Researching dossiers for {len(pids)} actors (depth: {depth}, cutoff {cutoff})…")
 
         async def one(pid: str):
-            p = next((x for x in sc.personas if x.id == pid), None)
+            p = next((x for x in self._all_personas(sc, branch_id) if x.id == pid), None)
             if not p:
                 return
             async with sem:
@@ -292,7 +353,7 @@ class Engine:
                         {"name": p.name, "role": p.role, "goals": p.goals, "stance": p.stance, "style": p.style,
                          "resources": p.resources, "background": p.background, "playbook": p.playbook,
                          "relationships": p.relationships, "red_lines": p.red_lines},
-                        {"title": sc.title, "question": sc.question}, cutoff, [x.name for x in sc.personas], depth)
+                        {"title": sc.title, "question": sc.question}, cutoff, [x.name for x in self._all_personas(sc, branch_id)], depth)
                     p.dossier = d
                     p.dossier_status = "done"
                     if not p.user_edited:
@@ -314,7 +375,8 @@ class Engine:
         sc = self.store.get(sid)
         if not sc:
             raise KeyError("scenario not found")
-        p = next((x for x in sc.personas if x.id == pid), None)
+        p = next((x for x in sc.personas if x.id == pid), None) or \
+            next((x for b in sc.branches.values() for x in b.extra_personas if x.id == pid), None)
         if pid == "new":
             p = Persona(id=new_id("p"), name=str(fields.get("name") or "New actor"), role="", goals="")
             sc.personas.append(p)
@@ -538,10 +600,11 @@ class Engine:
             self.store.save(sc)
             self.bus.publish({"type": "branch_status", "scenario_id": sc.id, "branch_id": br.id, "status": br.status})
 
-            dates = sc.dates_for(br.fork_date, br.total_rounds, br.step_days)
-            dates[-1] = min(dates[-1], sc.horizon_date)
+            dates = adaptive_schedule(br.fork_date, sc.horizon_date, br.total_rounds, sc.step_days)
+            br.schedule = dates
             prev = br.fork_date
             past_actions: dict[str, list[str]] = {}
+            self._log(sc, f"[{br.name}] {len(dates)} periods: first {_elapsed(br.fork_date, dates[0])}, last {_elapsed(dates[-2] if len(dates) > 1 else br.fork_date, dates[-1])}.", branch_id=br.id)
             for r, d in enumerate(dates):
                 personas = self._active_personas(sc, br)
                 visible = self.lineage_events(sc, br)
@@ -568,12 +631,14 @@ class Engine:
                         P.fill(P.AGENT_SYS, name=p.name, role=p.role, date=d, cutoff=br.knowledge_cutoff, goals=p.goals,
                                            stance=p.stance, style=p.style, resources=p.resources,
                                            background=p.background or "(not documented)", playbook=p.playbook or "(not documented)",
-                                           relationships=p.relationships or "(not documented)", red_lines=p.red_lines or "(not documented)"),
+                                           relationships=p.relationships or "(not documented)", red_lines=p.red_lines or "(not documented)",
+                                           state_block=_state_block(br, p)),
                         P.fill(P.AGENT_USER, premise_block=P.premise_block(br.premise, br.fork_date),
                                             notes_block=P.notes_block(sc.notes, br.notes) + _dossier_block(p),
                                             cutoff=br.knowledge_cutoff, briefing=br.briefing[:self.s.brief_chars],
                                             timeline=timeline_txt, memory=br.agent_memory.get(p.name, "(none)"),
                                             world_state=br.world_state or "(start of simulation)", date=d,
+                                            world_vars=_fmt_vars(br.world_vars),
                                             exogenous_block=agent_exo, elapsed=elapsed,
                                             past_actions="\n".join(f"- {a}" for a in past_actions.get(p.name, [])[-4:]) or "(none yet)"),
                         kind="agent_step", ctx={"name": p.name, "date": d, "premise": br.premise, "topic": sc.title,
@@ -610,7 +675,9 @@ class Engine:
                                           notes_block=P.notes_block(sc.notes, br.notes), cutoff=br.knowledge_cutoff,
                                           briefing_short=br.briefing[:self.s.brief_chars // 2], timeline=timeline_txt,
                                           elapsed=elapsed, exogenous_block=exogenous_block, parent_block=parent_block,
-                                          cast=", ".join(p.name for p in personas), actions=actions_txt, date=d, prev=prev),
+                                          world_vars=_fmt_vars(br.world_vars), juncture_history=_juncture_history(br),
+                                          cast="\n".join(f"- {p.name} ({p.role}) — {_state_line(br, p)}" for p in personas),
+                                          actions=actions_txt, date=d, prev=prev, period_len=_elapsed(prev, d)),
                     kind="arbiter", ctx={"date": d, "premise": br.premise, "topic": sc.title, "seed": br.id + d,
                                          "has_parent": bool(parent)}, max_tokens=2600, strong=True)
                 new_events = []
@@ -629,20 +696,36 @@ class Engine:
                     if not isinstance(j, dict) or not j.get("question"):
                         continue
                     p_yes = _float(j.get("p_yes"), 0.5)
+                    jd = _safe_date(j.get("date"), prev, d) or d
+                    hz = str(j.get("hazard_id") or "").strip()[:60]
+                    if hz:
+                        h = br.hazards.setdefault(hz, {"rolls": 0, "yes": 0, "last_p": p_yes, "question": str(j["question"])[:160]})
+                        if h["rolls"] >= 1 and p_yes > h["last_p"] * 1.05 and not j.get("p_change_reason"):
+                            p_yes = h["last_p"]  # a recurring hazard may not silently creep upward
+                        # cumulative-record guard: after repeated 'yes' outcomes the world adapts
+                        if h["yes"] >= 2:
+                            p_yes = min(p_yes, h["last_p"] * 0.6)
                     roll = rng.random()
                     yes = roll < p_yes
+                    if hz:
+                        h = br.hazards[hz]
+                        h["rolls"] += 1
+                        h["yes"] += int(yes)
+                        h["last_p"] = round(p_yes, 3)
                     branch = j.get("if_yes") if yes else j.get("if_no")
                     branch = branch if isinstance(branch, dict) else {}
-                    rec = {"date": d, "question": str(j["question"])[:200], "p_yes": round(p_yes, 2), "roll": round(roll, 3),
-                           "outcome": "yes" if yes else "no", "headline": str(branch.get("headline", ""))[:140], "round": r}
+                    rec = {"date": jd, "question": str(j["question"])[:200], "p_yes": round(p_yes, 2), "roll": round(roll, 3),
+                           "outcome": "yes" if yes else "no", "headline": str(branch.get("headline", ""))[:140], "round": r,
+                           "hazard_id": hz, "base_rate_note": str(j.get("base_rate_note", ""))[:200]}
                     br.junctures.append(rec)
                     new_events.append(Event(
-                        id=new_id("ev"), branch_id=br.id, date=d, headline=str(branch.get("headline") or j["question"])[:140],
-                        summary=f"[Juncture — {j['question']} p(yes)={p_yes:.2f}, rolled {roll:.2f} → {'YES' if yes else 'NO'}] "
+                        id=new_id("ev"), branch_id=br.id, date=jd, headline=str(branch.get("headline") or j["question"])[:140],
+                        summary=f"[Juncture — {j['question']} p(yes)={p_yes:.2f}, rolled {roll:.2f} → {'YES' if yes else 'NO'}"
+                                + (f"; base rate: {j.get('base_rate_note')}" if j.get("base_rate_note") else "") + "] "
                                 + str(branch.get("summary", "")), actors=_strlist(j.get("actors")), category="juncture",
                         kind="juncture", confidence=round(p_yes if yes else 1 - p_yes, 2),
                         divergence=0.5, importance=_int(j.get("importance"), 4), round=r, agent_actions=actions))
-                    self._log(sc, f"[{br.name}] Juncture {d}: {j['question']} — p={p_yes:.2f}, rolled {roll:.2f} → {'YES' if yes else 'NO'}",
+                    self._log(sc, f"[{br.name}] Juncture {jd}: {j['question']} — p={p_yes:.2f}, rolled {roll:.2f} → {'YES' if yes else 'NO'}",
                               branch_id=br.id)
                 if not new_events:
                     new_events.append(Event(id=new_id("ev"), branch_id=br.id, date=d, headline="Quiet period",
@@ -654,6 +737,28 @@ class Engine:
                 for x in due_s:
                     x["resolved"] = True
                 br.world_state = str(out.get("world_state", br.world_state))
+                wv = out.get("world_vars")
+                if isinstance(wv, dict):
+                    for k, v in wv.items():
+                        if isinstance(k, str) and isinstance(v, (str, int, float)):
+                            br.world_vars[k] = v
+                au = out.get("actor_updates")
+                if isinstance(au, dict):
+                    for name, upd in au.items():
+                        if not isinstance(upd, dict) or name not in self._cast_names(sc, br):
+                            continue
+                        st = br.agent_state.setdefault(name, _default_state(next((p for p in personas if p.name == name), None)))
+                        for k in ("office",):
+                            if isinstance(upd.get(k), str) and upd[k]:
+                                st[k] = upd[k][:120]
+                        for k in ("capital", "credibility", "pressure"):
+                            if upd.get(k) is not None:
+                                st[k] = _float(upd[k], st.get(k, 0.5))
+                        if isinstance(upd.get("priorities"), list):
+                            st["priorities"] = [str(x)[:100] for x in upd["priorities"][:3]]
+                        if isinstance(upd.get("grievance"), str) and upd["grievance"].strip():
+                            st.setdefault("grievances", []).append(f"{d}: {upd['grievance'][:140]}")
+                            st["grievances"] = st["grievances"][-4:]
                 ind = out.get("indicators") or {}
                 if isinstance(ind, dict):
                     br.indicators.append({"date": d, **{k: _float(v, 0.5) for k, v in ind.items() if isinstance(k, str)}})
@@ -687,7 +792,10 @@ class Engine:
                                       stance=g("stance"), style=g("style"), resources=g("resources"), background=g("background"),
                                       playbook=g("playbook"), relationships=g("relationships"), red_lines=g("red_lines"))
                         br.extra_personas.append(np_)
+                        br.agent_state[np_.name] = _default_state(np_)
                         self._log(sc, f"[{br.name}] New actor enters ({d}): {np_.name} — {np_.role}", branch_id=br.id)
+                        if self.s.research_depth != "off":
+                            self.start_research(sc.id, [np_.id], depth="quick", branch_id=br.id, cutoff=min(d, date.today().isoformat()))
                     except Exception as e:  # noqa: BLE001
                         self._log(sc, f"[{br.name}] could not cast new actor {na.get('name')}: {e}", "warning", branch_id=br.id)
 
@@ -793,6 +901,32 @@ class Engine:
             kind="interview", ctx={"name": p.name, "date": d, "premise": br.premise}, max_tokens=600)
         return {"persona": p.name, "answer": str(out.get("answer", ""))}
 
+    async def calibrate(self, sid: str, bid: str) -> dict:
+        """Score a run's junctures/events against the real timeline (Brier on junctures with known outcomes)."""
+        sc = self.store.get(sid)
+        br = sc.branches.get(bid) if sc else None
+        if not sc or not br:
+            raise KeyError("not found")
+        base = sc.branches.get(sc.baseline_branch_id)
+        end = min(sc.horizon_date, date.today().isoformat())
+        actual = [e for e in (base.events if base else []) if br.fork_date < e.date <= end and e.kind == "actual"]
+        j_txt = "\n".join(f"- {j['date']} Q: {j['question']} | p_yes={j['p_yes']} | rolled {j['outcome']}" for j in br.junctures) or "(none)"
+        e_txt = P.format_timeline([e for e in br.events if e.date <= end and e.kind in ("simulated", "exogenous")], 60)
+        out = await self.llm.json(P.CALIBRATE_SYS, P.fill(P.CALIBRATE_USER, title=sc.title, name=br.name,
+                                                            premise=br.premise or "(none — plain forecast)", start=br.fork_date, end=end,
+                                                            junctures=j_txt, events=e_txt, actual=P.format_timeline(actual, 120)),
+                                  kind="calibrate", ctx={"seed": br.id}, strong=True, max_tokens=3000, temperature=0.1)
+        scored = [(float(x.get("p_yes", 0.5)), x.get("actual")) for x in out.get("junctures", []) if x.get("actual") in ("yes", "no")]
+        brier = sum((p - (1.0 if a == "yes" else 0.0)) ** 2 for p, a in scored) / len(scored) if scored else None
+        ev = [x.get("actual") for x in out.get("events", []) if x.get("actual") in ("yes", "partly", "no")]
+        out["brier"] = round(brier, 3) if brier is not None else None
+        out["n_scored_junctures"] = len(scored)
+        out["event_hit_rate"] = round((ev.count("yes") + 0.5 * ev.count("partly")) / len(ev), 2) if ev else None
+        out["window_end"] = end
+        br.report["calibration"] = out
+        self.store.save(sc)
+        return out
+
     async def compare(self, sid: str, a_id: str, b_id: str) -> dict:
         sc = self.store.get(sid)
         if not sc or a_id not in sc.branches or b_id not in sc.branches:
@@ -896,3 +1030,74 @@ def _elapsed(start: str, end: str) -> str:
     if days < 730:
         return f"{days // 30} months"
     return f"{days / 365.25:.1f} years"
+
+
+def adaptive_schedule(start: str, end: str, rounds: int, min_step: int) -> list[str]:
+    """Period end dates: periods double in length from min_step right after the fork (7, 14, 28, 56 … days) until the
+    remaining time divides evenly at that granularity, then stay uniform. Dense where consequences unfold, coarse later."""
+    a, b = date.fromisoformat(start), date.fromisoformat(end)
+    total = max(1, (b - a).days)
+    rounds = max(1, rounds)
+    step = float(max(1, min_step))
+    steps: list[float] = []
+    remaining_days, remaining_rounds = float(total), rounds
+    while remaining_rounds > 0:
+        uniform = remaining_days / remaining_rounds
+        if uniform <= step * 2 or remaining_rounds == 1:
+            steps += [uniform] * remaining_rounds
+            break
+        steps.append(step)
+        remaining_days -= step
+        remaining_rounds -= 1
+        step *= 2
+    out, acc = [], 0.0
+    for st in steps:
+        acc += st
+        out.append((a + timedelta(days=round(acc))).isoformat())
+    out[-1] = end
+    # guarantee strictly increasing dates
+    for i in range(1, len(out)):
+        if out[i] <= out[i - 1]:
+            out[i] = (date.fromisoformat(out[i - 1]) + timedelta(days=1)).isoformat()
+    out[-1] = max(out[-1], end)
+    return out
+
+
+def _default_state(p: Persona | None) -> dict:
+    return {"office": p.role if p else "", "capital": 0.6, "credibility": 0.6, "pressure": 0.3,
+            "priorities": [], "grievances": []}
+
+
+def _state_block(br: Branch, p: Persona) -> str:
+    st = br.agent_state.get(p.name) or _default_state(p)
+    frame = "LOSING (take risks, seek a reset or a scapegoat)" if st.get("capital", .6) < 0.4 or st.get("pressure", .3) > 0.7 \
+        else "WINNING (consolidate, avoid needless fights)" if st.get("capital", .6) > 0.7 and st.get("pressure", .3) < 0.4 else "CONTESTED"
+    return (f"- Office/position: {st.get('office') or p.role}\n- Political/organisational capital: {st.get('capital', .6):.2f}   "
+            f"Credibility: {st.get('credibility', .6):.2f}   Pressure on you: {st.get('pressure', .3):.2f}  → frame: {frame}\n"
+            f"- Current priorities: {', '.join(st.get('priorities') or []) or '(as in your goals)'}\n"
+            f"- Grievances: {'; '.join(st.get('grievances') or []) or 'none yet'}")
+
+
+def _state_line(br: Branch, p: Persona) -> str:
+    st = br.agent_state.get(p.name) or _default_state(p)
+    return f"{st.get('office') or p.role}; capital {st.get('capital', .6):.2f}, credibility {st.get('credibility', .6):.2f}, pressure {st.get('pressure', .3):.2f}"
+
+
+def _fmt_vars(v: dict) -> str:
+    if not v:
+        return "(not yet established — set them this period)"
+    return "; ".join(f"{k.replace('_', ' ')}: {val}" for k, val in v.items())
+
+
+def _juncture_history(br: Branch) -> str:
+    if not br.junctures:
+        return "(none yet)"
+    lines = [f"- {j['date']} {j['question']} — p={j['p_yes']} → {j['outcome'].upper()}" + (f" [hazard {j['hazard_id']}]" if j.get('hazard_id') else "")
+             for j in br.junctures[-14:]]
+    if br.hazards:
+        lines.append("HAZARD RECORD: " + "; ".join(f"{k}: rolled {h['rolls']}×, {h['yes']} yes, last p {h['last_p']}" for k, h in br.hazards.items()))
+    return "\n".join(lines)
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9 ]", "", s.lower())
