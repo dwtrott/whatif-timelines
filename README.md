@@ -17,8 +17,15 @@ in **Google Colab** on `localhost`, with **any OpenAI-compatible model** — an 
    * any **seed documents** you paste.
 2. **Ground.** A leakage-filter pass rewrites the material into a briefing containing only what was knowable on the
    cutoff date, and lists what it stripped (visible in the GUI, so you can judge leakage risk yourself).
-3. **Cast.** The model designs the 2–12 actors whose decisions drive the situation — heads of government, central
-   banks, opposition, press, markets, foreign capitals… These are the agents.
+3. **Cast, then research.** The model designs the 2–12 actors whose decisions drive the situation — real named
+   people, their counterparties and kingmakers. Then a research agent builds an **evidence-backed dossier per actor**
+   as of the cutoff: Wikipedia + Wikiquote revisions as-of, web search (Exa date-cut / Serper / DuckDuckGo) with pages
+   fetched from the **Wayback Machine snapshot before the cutoff**, dated evidence extraction, and a synthesis in the
+   schema the IC uses for at-a-distance leader profiling — precedents, Operational Code (George/Walker), Leadership
+   Trait Analysis (Hermann), decision style, on-record commitments, pressure points, relationships, a quote bank — each
+   cited, with a confidence, a gaps list and a leakage/unsupported-claims critic pass. The dossier digest rides in every
+   agent prompt. (Rationale: Park et al. 2024 — agents built from rich first-person material replicate real people's
+   behaviour at ~85% normalized accuracy; agents built from short persona paragraphs do markedly worse.)
 4. **Baseline.** Real events between your anchor date and today are extracted onto the grey *Actual history* lane.
    If the horizon is in the future, a *Baseline forecast* lane starts automatically from today.
 5. **Fork.** Click any event → *What if…* → new lane. Every period all agents decide **concurrently** (observe →
@@ -51,7 +58,8 @@ python -m whatif --provider mock
 ```
 
 Env vars use the same names as go-mirofish (`LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL_NAME`) plus
-`WHATIF_PROVIDER` for a preset and `WHATIF_STRONG_MODEL` for the judgement-role model. Everything can also be changed at runtime from the provider chip in the top bar.
+`WHATIF_PROVIDER` for a preset, `WHATIF_STRONG_MODEL` for the judgement-role model, `WHATIF_RESEARCH_DEPTH`
+(off|quick|standard|deep) and optional `EXA_API_KEY` / `SERPER_API_KEY` for date-cut web search in dossiers. Everything can also be changed at runtime from the provider chip in the top bar.
 
 | preset | base URL | default model | cost |
 |---|---|---|---|
@@ -78,6 +86,7 @@ Knobs: max rounds (per fork or globally), agents per scenario, `WHATIF_CONCURREN
 | `POST /api/scenarios/{id}/fork` | `{parent_branch_id, fork_event_id?, fork_date?, premise, name?, max_rounds?, step_days?}` |
 | `POST …/branches/{bid}/stop`, `DELETE …/branches/{bid}` | |
 | `PATCH …/personas/{pid}` (or `/personas/new`), `DELETE …/personas/{pid}`, `POST …/recast` `{notes}` | edit the cast |
+| `POST …/research` `{persona_ids?, depth?}` | build dossiers (all missing, or the given actors) |
 | `POST …/branches/{bid}/interview` | `{persona_id, question}` |
 | `GET …/compare?a=&b=` | LLM comparison of two lanes |
 | `GET /api/events` | SSE stream (log lines, agent actions, LLM calls, progress) |
@@ -92,6 +101,7 @@ whatif/
   config.py     provider presets + settings (env-driven)
   llm.py        OpenAI-compatible async client: concurrency, RPM limiter, retries, JSON repair, mock provider
   retrieval.py  Wikipedia as-of-date revisions, present-day extracts, GDELT, wikitext cleaning
+  research.py   per-actor dossiers: plan → collect (Wikipedia/Wikiquote as-of, Exa/Serper/DDG, Wayback) → evidence → synthesis → critic
   prompts.py    all prompt templates (librarian, leakage filter, historian, casting, agent, arbiter, report…)
   engine.py     orchestration: prepare scenario, fork, swarm round loop, reports, interviews, comparisons
   models.py     Scenario / Branch / Event / Persona dataclasses

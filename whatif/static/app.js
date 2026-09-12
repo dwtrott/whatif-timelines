@@ -78,7 +78,8 @@ async function refreshScenario() {
 function isActive() {
   if (!state.sc) return false;
   if (['retrieving', 'new'].includes(state.sc.status)) return true;
-  return Object.values(state.sc.branches).some(b => ['running', 'retrieving', 'pending'].includes(b.status));
+  return Object.values(state.sc.branches).some(b => ['running', 'retrieving', 'pending'].includes(b.status))
+    || (state.sc.personas || []).some(p => p.dossier_status === 'researching');
 }
 
 function schedulePoll() {
@@ -97,7 +98,7 @@ function handleBusMessage(m) {
       const b = state.sc?.branches?.[m.branch_id];
       logLine({ts: m.ts, level: 'agent', msg: `[${b ? b.name : m.branch_id}] ${m.date} · ` + m.actions.map(a => `${a.name}: ${a.action}`).join('  ‖  ')});
     } else if (m.type === 'llm_call') logLine({ts: m.ts, level: 'llm', msg: `llm ${m.kind || ''} ${m.model} ${m.ms}ms ${m.tokens ? m.tokens + ' tok' : ''}`});
-    else if (m.type === 'scenario_ready' || m.type === 'branch_status' || m.type === 'branch_progress') {
+    else if (m.type === 'scenario_ready' || m.type === 'branch_status' || m.type === 'branch_progress' || m.type === 'dossier') {
       if (state.sc && m.scenario_id === state.sc.id) refreshScenario();
       if (m.type === 'scenario_ready') loadScenarios();
     }
@@ -185,7 +186,8 @@ function renderSidebar() {
     </div>`;
   }).join('');
   $('#agentCount').textContent = sc.personas.length;
-  al.innerHTML = sc.personas.map(p => `<div class="item" onclick="showPersona('${p.id}')"><div class="t"><span class="name">${esc(p.name)}</span></div><div class="sub" style="margin-left:0">${esc(p.role)}</div></div>`).join('') || '<div class="muted small">casting…</div>';
+  const dstat = p => p.dossier_status === 'researching' ? '<span class="status running">researching…</span>' : p.dossier_status === 'done' ? `<span class="status completed" title="evidence-backed dossier">${(p.dossier?.sources || []).length} src</span>` : p.dossier_status === 'failed' ? '<span class="status failed">no dossier</span>' : '';
+  al.innerHTML = sc.personas.map(p => `<div class="item ${state.sel?.type === 'persona' && state.sel.id === p.id ? 'active' : ''}" onclick="showPersona('${p.id}')"><div class="t"><span class="name">${esc(p.name)}</span><span class="spacer"></span>${dstat(p)}</div><div class="sub" style="margin-left:0">${esc(p.role)}</div></div>`).join('') || '<div class="muted small">casting…</div>';
   $('#docCount').textContent = sc.docs.length;
   const label = {wikipedia_asof: 'wiki as-of', wikipedia_latest: 'wiki today', gdelt: 'gdelt', user: 'seed'};
   dl.innerHTML = sc.docs.slice(0, 60).map(d => `<div class="item" style="padding:4px 8px" title="${esc(d.note)}">
@@ -550,11 +552,42 @@ function showPersona(pid, edit = false) {
         <div class="row end"><button class="ghost" onclick="${pid === 'new' ? 'renderDetail()' : `showPersona('${pid}')`}">cancel</button><button class="primary" onclick="savePersona('${pid}')">save</button></div></div>`;
     return;
   }
-  box.innerHTML = `<div class="dhead"><div class="kicker">agent${p.user_edited ? ' · edited by you' : ''}</div><h2>${esc(p.name)}</h2><div class="muted">${esc(p.role)}</div>
-      <div class="row" style="margin-top:8px"><button class="small" onclick="showPersona('${pid}', true)">edit</button><button class="ghost small danger" onclick="deletePersona('${pid}')">remove</button></div></div>
+  const d = p.dossier && !p.dossier.error ? p.dossier : null;
+  box.innerHTML = `<div class="dhead"><div class="kicker">agent${p.user_edited ? ' · edited by you' : ''}${p.dossier_status === 'researching' ? ' · <span class="status running">researching…</span>' : ''}</div><h2>${esc(p.name)}</h2><div class="muted">${esc(p.role)}</div>
+      <div class="row" style="margin-top:8px"><button class="small" onclick="showPersona('${pid}', true)">edit</button><button class="ghost small" onclick="researchPersona('${pid}')">${d ? 're-research' : 'research'}</button><button class="ghost small danger" onclick="deletePersona('${pid}')">remove</button></div>
+      ${p.dossier?.error ? `<div class="errbox" style="margin-top:8px">dossier failed: ${esc(p.dossier.error)}</div>` : ''}</div>
     <div class="dsec"><div class="kv">${PERSONA_FIELDS.slice(2).filter(([k]) => p[k]).map(([k, label]) => `<b>${label.toLowerCase()}</b><span>${esc(p[k])}</span>`).join('')}</div></div>
-    <div class="dsec small muted">Open a branch to interview this agent inside that timeline. Edit the profile if you know this actor better than the model does — the swarm will play them your way.</div>`;
+    ${d ? dossierHTML(d) : `<div class="dsec small muted">No evidence dossier yet${p.dossier_status === 'researching' ? ' — building now' : ' — click research'}. Edit the profile if you know this actor better than the model does.</div>`}`;
   renderSidebar();
+}
+
+function dossierHTML(d) {
+  const kv = obj => obj && typeof obj === 'object' ? `<div class="kv">${Object.entries(obj).filter(([, v]) => typeof v === 'string' && v).map(([k, v]) => `<b>${esc(k.replace(/_/g, ' '))}</b><span>${esc(v)}</span>`).join('')}</div>` : '';
+  const list = arr => Array.isArray(arr) && arr.length ? `<ul class="md">${arr.map(x => `<li>${esc(typeof x === 'string' ? x : JSON.stringify(x))}</li>`).join('')}</ul>` : '';
+  const conf = d.confidence != null ? `<span class="tag">confidence ${Math.round(d.confidence * 100)}%</span>` : '';
+  const crit = d.critic || {};
+  return `
+    <div class="dsec"><h4>Dossier ${conf} <span class="tag">as of ${esc(d.built_for_cutoff || '')}</span></h4>
+      <div class="md"><p>${esc(d.summary || '')}</p></div>
+      ${(crit.leakage || []).length || (crit.unsupported || []).length ? `<div class="flag">⚠ critic: ${esc([...(crit.leakage || []).map(x => 'leakage: ' + x), ...(crit.unsupported || []).map(x => 'unsupported: ' + x)].join(' · ')).slice(0, 600)}</div>` : ''}
+      ${crit.verdict ? `<div class="small muted">${esc(crit.verdict)}</div>` : ''}</div>
+    ${Array.isArray(d.precedents) && d.precedents.length ? `<div class="dsec"><h4>Precedents</h4>${d.precedents.map(p => `<div class="agentAct"><div class="who">${esc(p.when || '')} <span>· ${esc(p.situation || '')}</span></div><div>${esc(p.what_they_did || '')}</div><div class="say">→ ${esc(p.outcome || '')}</div>${p.source ? `<div class="small"><a href="${esc(p.source)}" target="_blank" rel="noopener">source</a></div>` : ''}</div>`).join('')}</div>` : ''}
+    ${d.operational_code ? `<div class="dsec"><h4>Operational code</h4>${kv(d.operational_code)}</div>` : ''}
+    ${d.decision_style ? `<div class="dsec"><h4>Decision style</h4>${typeof d.decision_style === 'string' ? esc(d.decision_style) : kv(d.decision_style)}</div>` : ''}
+    ${d.leadership_traits ? `<div class="dsec"><h4>Leadership traits (Hermann LTA)</h4>${kv(d.leadership_traits)}</div>` : ''}
+    ${(d.stated_commitments || []).length ? `<div class="dsec"><h4>On-record commitments</h4>${list(d.stated_commitments)}</div>` : ''}
+    ${(d.pressure_points || []).length || (d.constraints || []).length ? `<div class="dsec"><h4>Pressure points &amp; constraints</h4>${list(d.pressure_points)}${list(d.constraints)}</div>` : ''}
+    ${Array.isArray(d.relationships) && d.relationships.length ? `<div class="dsec"><h4>Relationships</h4>${list(d.relationships.map(r => typeof r === 'string' ? r : `${r.with}: ${r.nature}${r.leverage ? ' (leverage: ' + r.leverage + ')' : ''}`))}</div>` : ''}
+    ${d.voice?.quotes?.length ? `<div class="dsec"><h4>In their own words</h4><div class="small muted">${esc(d.voice.style || '')}</div>${list(d.voice.quotes)}</div>` : ''}
+    ${(d.gaps || []).length ? `<div class="dsec"><h4>Gaps</h4>${list(d.gaps)}</div>` : ''}
+    ${(d.sources || []).length ? `<div class="dsec"><details><summary class="muted small">${d.sources.length} sources · ${(d.evidence || []).length} evidence items</summary>${d.sources.map(s => `<div class="small" style="margin:3px 0"><span class="tag">${esc(s.kind)}</span> <a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a> <span class="muted">${esc(s.as_of || '')}${s.cutoff_ok === false ? ' ⚠ filtered' : ''} · ${((s.chars || 0) / 1000).toFixed(1)}k</span></div>`).join('')}
+      <details style="margin-top:6px"><summary class="muted small">evidence</summary>${(d.evidence || []).map(e => `<div class="small" style="margin:3px 0"><span class="mono muted">${esc(e.date)}</span> <span class="tag">${esc(e.type)}</span> ${esc(e.claim)}${e.quote ? ` <i>"${esc(e.quote)}"</i>` : ''}</div>`).join('')}</details></details></div>` : ''}`;
+}
+
+async function researchPersona(pid) {
+  await api(`/api/scenarios/${state.sc.id}/research`, 'POST', {persona_ids: [pid]});
+  toast('researching ' + (state.sc.personas.find(p => p.id === pid)?.name || 'actor') + '…');
+  setTimeout(refreshScenario, 800);
 }
 
 async function savePersona(pid) {
@@ -647,7 +680,10 @@ function openProvider() {
   const sel = $('#pPreset');
   sel.innerHTML = c.presets.map(p => `<option value="${p.key}">${esc(p.label)}${p.free_tier ? ' · free' : ''}</option>`).join('') + '<option value="custom">Custom OpenAI-compatible</option>';
   sel.value = c.presets.some(p => p.key === s.provider) ? s.provider : 'custom';
-  $('#pBase').value = s.base_url; $('#pModel').value = s.model; $('#pStrong').value = s.strong_model || ''; $('#pConc').value = s.concurrency; $('#pRpm').value = s.rpm; $('#pRounds').value = c.max_rounds; $('#pKey').value = '';
+  $('#pBase').value = s.base_url; $('#pModel').value = s.model; $('#pStrong').value = s.strong_model || '';
+  $('#pDepth').value = s.research_depth || 'standard'; $('#pExa').value = ''; $('#pSerper').value = '';
+  $('#pExa').placeholder = s.has_exa ? 'key set — blank keeps it' : 'no key (DuckDuckGo + Wayback fallback)';
+  $('#pSerper').placeholder = s.has_serper ? 'key set — blank keeps it' : 'no key'; $('#pConc').value = s.concurrency; $('#pRpm').value = s.rpm; $('#pRounds').value = c.max_rounds; $('#pKey').value = '';
   const notes = () => {
     const p = c.presets.find(x => x.key === sel.value);
     $('#pNotes').innerHTML = p ? `${esc(p.notes)} ${p.signup ? `<a href="${p.signup}" target="_blank" rel="noopener">get a key ↗</a>` : ''} ${p.key_env ? `· env <code>${p.key_env}</code>` : ''}` : 'Any endpoint that speaks /chat/completions.';
@@ -660,7 +696,7 @@ function openProvider() {
 
 async function saveProvider() {
   const body = {provider: $('#pPreset').value === 'custom' ? '' : $('#pPreset').value, api_key: $('#pKey').value, base_url: $('#pBase').value, model: $('#pModel').value,
-    strong_model: $('#pStrong').value, concurrency: +$('#pConc').value || undefined, rpm: $('#pRpm').value === '' ? undefined : +$('#pRpm').value, max_rounds: +$('#pRounds').value || undefined};
+    strong_model: $('#pStrong').value, research_depth: $('#pDepth').value, exa_api_key: $('#pExa').value, serper_api_key: $('#pSerper').value, concurrency: +$('#pConc').value || undefined, rpm: $('#pRpm').value === '' ? undefined : +$('#pRpm').value, max_rounds: +$('#pRounds').value || undefined};
   if (body.provider === '' && !body.base_url) return alert('Base URL required for a custom provider.');
   $('#pResult').textContent = 'testing…';
   try {
@@ -705,6 +741,7 @@ function bindUI() {
   $('#helpBtn').onclick = () => openModal('helpModal');
   $('#addAgentBtn').onclick = () => { if (state.sc) showPersona('new'); };
   $('#recastBtn').onclick = () => { if (state.sc?.baseline_branch_id) recastAgents(); };
+  $('#researchBtn').onclick = async () => { if (!state.sc) return; const r = await api(`/api/scenarios/${state.sc.id}/research`, 'POST', {}); toast(r.started ? `researching ${r.started} actors…` : 'all actors already have dossiers (use re-research on an actor to rebuild)'); setTimeout(refreshScenario, 800); };
   $('#consoleToggle').onclick = () => { const c = $('#console'); c.classList.toggle('collapsed'); $('#consoleToggle').textContent = c.classList.contains('collapsed') ? 'show' : 'hide'; };
   $$('.modal').forEach(m => m.addEventListener('click', e => { if (e.target === m) m.hidden = true; }));
   const scroll = $('#timelineScroll');

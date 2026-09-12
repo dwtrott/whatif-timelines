@@ -75,6 +75,10 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
                             concurrency=body.get("concurrency"), rpm=body.get("rpm"))
         if "strong_model" in body:
             new.strong_model = (body.get("strong_model") or "").strip()
+        new.exa_api_key = (body.get("exa_api_key") or "").strip() or engine.s.exa_api_key
+        new.serper_api_key = (body.get("serper_api_key") or "").strip() or engine.s.serper_api_key
+        if body.get("research_depth") in ("off", "quick", "standard", "deep"):
+            new.research_depth = body["research_depth"]
         if provider and not body.get("api_key") and engine.s.provider == provider:
             new.api_key = engine.s.api_key  # keep the existing key when only the model changes
         if body.get("max_rounds"):
@@ -195,6 +199,15 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
             return {"deleted": engine.delete_persona(sid, pid)}
         except KeyError as e:
             raise HTTPException(404, str(e))
+
+    @app.post("/api/scenarios/{sid}/research")
+    async def research(sid: str, req: Request):
+        body = await req.json() if await req.body() else {}
+        pids = body.get("persona_ids") or None
+        depth = body.get("depth") or None
+        if not store.get(sid):
+            raise HTTPException(404, "scenario not found")
+        return {"started": engine.start_research(sid, pids, depth)}
 
     @app.post("/api/scenarios/{sid}/recast")
     async def recast(sid: str, req: Request):

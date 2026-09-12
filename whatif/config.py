@@ -107,6 +107,9 @@ class Settings:
     concurrency: int
     rpm: int
     strong_model: str = ""       # optional bigger model for judgement roles (casting, arbiter, report, compare, history)
+    exa_api_key: str = ""        # optional: date-cut web search for dossiers (exa.ai)
+    serper_api_key: str = ""     # optional: Google via serper.dev (date-range search)
+    research_depth: str = "standard"   # off | quick | standard | deep
     timeout: float = 120.0
     temperature: float = 0.7
     data_dir: str = "data"
@@ -131,6 +134,8 @@ class Settings:
             "base_url": self.base_url,
             "model": self.model,
             "strong_model": self.strong_model,
+            "has_exa": bool(self.exa_api_key), "has_serper": bool(self.serper_api_key),
+            "research_depth": self.research_depth,
             "concurrency": self.concurrency,
             "rpm": self.rpm,
             "has_key": bool(self.api_key) or self.provider in ("ollama", "mock"),
@@ -199,6 +204,9 @@ def load_settings(**overrides) -> Settings:
     if _env("WHATIF_USER_AGENT"):
         s.user_agent = _env("WHATIF_USER_AGENT")
     s.strong_model = _env("WHATIF_STRONG_MODEL", "LLM_STRONG_MODEL")
+    s.exa_api_key = _env("EXA_API_KEY")
+    s.serper_api_key = _env("SERPER_API_KEY")
+    s.research_depth = _env("WHATIF_RESEARCH_DEPTH") or "standard"
     for k, v in overrides.items():
         if hasattr(s, k) and v is not None:
             setattr(s, k, v)

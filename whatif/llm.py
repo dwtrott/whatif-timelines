@@ -397,6 +397,22 @@ def mock_response(kind: str, messages: list[dict], ctx: dict) -> str:
                             "points": [{"dimension": "Pace", "a": "gradual", "b": "abrupt"},
                                        {"dimension": "Winner", "a": pick(_ACTORS)[0], "b": pick(_ACTORS)[0]},
                                        {"dimension": "End state", "a": "fragile stability", "b": "open crisis"}]})
+    if kind == "research_plan":
+        return _json.dumps({"is_individual": True, "wikipedia_titles": [ctx.get("name", "")], "queries": [], "own_domains": []})
+    if kind == "evidence":
+        return _json.dumps({"evidence": [{"date": "2019", "type": "precedent", "claim": f"{ctx.get('name')} faced a similar showdown and escalated.", "quote": "We do not blink.", "weight": 0.7}]})
+    if kind == "dossier":
+        n = ctx.get("name", "Actor")
+        return _json.dumps({"summary": f"{n} is a fast-moving operator who escalates when cornered and builds coalitions quickly.",
+                            "precedents": [{"when": "2019", "situation": "board dispute", "what_they_did": "rallied staff and funders", "outcome": "prevailed", "source": "mock://"}],
+                            "operational_code": {"view_of_adversaries": "obstacles to route around", "control_over_events": "high", "risk_orientation": "risk-seeking when losing", "preferred_strategy": "coalition + speed", "tactics": "leaks, ultimatums", "timing": "moves within days", "use_of_pressure_vs_cooperation": "pressure first"},
+                            "leadership_traits": {"belief_in_control": "high", "need_for_power": "high", "conceptual_complexity": "medium", "self_confidence": "high", "task_vs_relationship_focus": "task", "distrust_of_others": "medium", "in_group_bias": "medium"},
+                            "decision_style": {"speed": "fast", "consultation": "small inner circle", "public_vs_private": "public when useful", "escalation_pattern": "rapid", "response_to_threat": "fight"},
+                            "stated_commitments": ["never accept a demotion"], "relationships": [{"with": "the board", "nature": "rival", "leverage": "staff loyalty", "source": "mock://"}],
+                            "pressure_points": ["loyalty of key staff"], "constraints": ["contract terms"], "voice": {"style": "terse, confident", "quotes": ["We do not blink. (2019)"]},
+                            "playbook": ["rally staff", "line up a rival home", "public ultimatum"], "red_lines": ["being sidelined"], "confidence": 0.6, "gaps": ["mock data"]})
+    if kind == "dossier_critic":
+        return _json.dumps({"leakage": [], "unsupported": [], "verdict": "mock"})
     if kind == "ground":
         return _json.dumps({"context": f"Background on {topic} as of {date}: key actors are positioning; the situation is fluid.",
                             "open_questions": ["Who blinks first?", "Does the coalition hold?"]})

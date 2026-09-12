@@ -26,7 +26,8 @@
     <section class="panel">
       <h3>Agents <span id="agentCount" class="badge"></span><span class="spacer"></span>
         <button class="ghost small" id="addAgentBtn" title="Add an actor by hand">+ add</button>
-        <button class="ghost small" id="recastBtn" title="Re-run casting with your guidance">recast…</button></h3>
+        <button class="ghost small" id="recastBtn" title="Re-run casting with your guidance">recast…</button>
+        <button class="ghost small" id="researchBtn" title="Build evidence-backed dossiers for actors that lack one">research</button></h3>
       <div id="agentList" class="list"></div>
     </section>
     <section class="panel">
@@ -110,6 +111,13 @@
     <label>Base URL<input id="pBase"></label>
     <label>Model (agents) <button class="ghost small" id="pListModels">list models</button><input id="pModel" list="modelList"><datalist id="modelList"></datalist></label>
     <label>Strong model (casting, arbiter, reports, history — optional; e.g. gpt-4.1, gpt-4o, o4-mini)<input id="pStrong" list="modelList" placeholder="blank = same as agents"></label>
+    <h3 style="margin-top:10px">Actor research (dossiers)</h3>
+    <p class="small muted">Per-actor evidence gathering: Wikipedia/Wikiquote as of the cutoff, Wayback snapshots, and web search. A date-cut search key makes dossiers much better.</p>
+    <div class="grid2">
+      <label>Depth<select id="pDepth"><option value="off">off (cast only)</option><option value="quick">quick</option><option value="standard">standard</option><option value="deep">deep</option></select></label>
+      <label>Exa API key (<a href="https://exa.ai" target="_blank" rel="noopener">exa.ai</a>, free tier; true date-cut search)<input id="pExa" type="password" placeholder="blank = keep current"></label>
+      <label>Serper API key (<a href="https://serper.dev" target="_blank" rel="noopener">serper.dev</a>, Google date-range)<input id="pSerper" type="password" placeholder="blank = keep current"></label>
+    </div>
     <div class="grid2">
       <label>Concurrency<input id="pConc" type="number" min="1" max="32"></label>
       <label>Requests / min (0 = off)<input id="pRpm" type="number" min="0"></label>

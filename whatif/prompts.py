@@ -274,3 +274,91 @@ _PH = _re.compile(r"\{([a-z_]+)\}")
 def fill(template: str, **kw) -> str:
     """Substitute {name} placeholders without touching the JSON braces in the templates."""
     return _PH.sub(lambda m: str(kw[m.group(1)]) if m.group(1) in kw else m.group(0), template)
+
+
+# ====================================================================== dossier research
+RESEARCH_PLAN_SYS = """You are a research director planning an at-a-distance profile of one actor for a forecasting simulation.
+The profile must predict how this actor BEHAVES UNDER PRESSURE, so the plan targets: past crises and conflicts and what
+they did; negotiation and escalation habits; public statements that commit them; relationships with the other actors in
+the cast; their constraints (legal, financial, reputational); and their own voice (interviews, blog posts, speeches).
+Everything must be knowable on or before the cutoff date — phrase queries so they find pre-cutoff material
+(mention earlier years/events, not later ones).
+
+Return JSON: {"is_individual": true/false, "wikipedia_titles": ["their article", "1-3 closely related articles (prior
+company, prior controversy, key relationship)"], "queries": ["{n} web search queries, specific, each targeting one
+behavioural question"], "own_domains": ["personal blog / company newsroom domains if known"]}"""
+
+RESEARCH_PLAN_USER = """Actor: {name} — {role}
+Scenario: {title} — {question}
+Knowledge cutoff: {cutoff}
+Other actors in the cast: {cast}
+Number of queries: {n}"""
+
+
+EVIDENCE_SYS = """You extract dated behavioural evidence about one actor from a document, for a leader profile.
+Knowledge cutoff: {cutoff}. Keep ONLY items whose own date is on or before the cutoff (if the item is undated but
+clearly refers to an earlier period, use "undated" and include it; if it could postdate the cutoff, drop it).
+
+Extract items of these types:
+- decision: something they chose to do, with the situation and result
+- statement: something they said on the record (quote verbatim where possible)
+- relationship: an alliance, rivalry, dependency, betrayal, loyalty
+- trait: a documented behavioural pattern (e.g. "moves within days", "avoids direct confrontation")
+- precedent: a past situation analogous to a leadership/governance/negotiation crisis and how they handled it
+- constraint: legal, financial, contractual or reputational limits on them
+
+Return JSON: {"evidence": [{"date": "YYYY-MM-DD or YYYY or undated", "type": "...", "claim": "one precise sentence",
+"quote": "verbatim words if present, else empty", "weight": 0-1 (how diagnostic of behaviour under pressure)}]}
+- 0 to 12 items. Precision over volume; no generic biography ("born in...", "attended...")."""
+
+EVIDENCE_USER = """Actor: {name}
+Document: {title} <{url}> (content as of: {as_of}; {flag})
+
+{text}"""
+
+
+DOSSIER_SYS = """You are a political-psychology profiler producing an at-a-distance assessment of one actor for a
+multi-agent forecasting simulation. Knowledge cutoff: {cutoff} — nothing after it may inform the profile.
+Use the evidence provided; cite it. Where the evidence is thin, say so in 'gaps' and lower 'confidence' — never fill
+gaps with plausible-sounding invention. Where the actor is an institution, profile its decision process and the people
+who dominate it.
+
+Return JSON with EXACTLY these keys:
+{"summary": "4-6 sentences: who this actor is in this situation and how they can be expected to behave",
+"precedents": [{"when": "YYYY or YYYY-MM", "situation": "...", "what_they_did": "...", "outcome": "...", "source": "url"}],
+"operational_code": {"view_of_adversaries": "...", "control_over_events": "low/medium/high + why", "risk_orientation": "...",
+  "preferred_strategy": "...", "tactics": "...", "timing": "moves fast/slow; waits for X", "use_of_pressure_vs_cooperation": "..."},
+"leadership_traits": {"belief_in_control": "low/medium/high — evidence", "need_for_power": "...", "conceptual_complexity": "...",
+  "self_confidence": "...", "task_vs_relationship_focus": "...", "distrust_of_others": "...", "in_group_bias": "..."},
+"decision_style": {"speed": "...", "consultation": "who they listen to", "public_vs_private": "...", "escalation_pattern": "...",
+  "response_to_threat": "fight / deal / withdraw / delay — with evidence"},
+"stated_commitments": ["on-record positions they would pay a price to reverse"],
+"relationships": [{"with": "name (from the cast where possible)", "nature": "ally/rival/dependent/…", "leverage": "who holds it", "source": "url"}],
+"pressure_points": ["what can move them: money, legal exposure, reputation, loyalty of specific people…"],
+"constraints": ["hard limits on what they can do"],
+"voice": {"style": "how they talk/write", "quotes": ["5-8 short verbatim quotes with the year"]},
+"playbook": ["their characteristic moves in a crisis, most likely first"],
+"red_lines": ["what they will not accept and will escalate over"],
+"confidence": 0-1,
+"gaps": ["what the evidence does not cover"]}"""
+
+DOSSIER_USER = """Actor: {name} — {role}
+Scenario: {title} — {question}
+Knowledge cutoff: {cutoff}
+Cast: {cast}
+
+Current (unverified) profile from casting: {current}
+
+EVIDENCE (dated; each with source URL):
+{evidence}"""
+
+
+DOSSIER_CRITIC_SYS = """You audit a leader profile for a forecasting simulation. Knowledge cutoff: {cutoff}.
+Check: (1) LEAKAGE — any statement that depends on events after the cutoff, or on hindsight ('would later', outcomes);
+(2) UNSUPPORTED — trait/precedent claims not backed by the cited evidence, or generic filler.
+Return JSON: {"leakage": ["quoted fragment — why it is post-cutoff"], "unsupported": ["quoted fragment — why"],
+"verdict": "one sentence on how much to trust this profile"}"""
+
+DOSSIER_CRITIC_USER = """Actor: {name}
+Profile JSON:
+{dossier}"""

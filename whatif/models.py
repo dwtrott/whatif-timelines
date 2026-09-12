@@ -25,6 +25,8 @@ class Persona:
     relationships: str = ""   # allies, rivals, dependencies
     red_lines: str = ""       # what they will not accept / will fight over
     user_edited: bool = False
+    dossier: dict = field(default_factory=dict)   # evidence-backed profile (see research.py)
+    dossier_status: str = ""  # "" | researching | done | failed
 
 
 @dataclass

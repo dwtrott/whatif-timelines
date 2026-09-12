@@ -52,7 +52,7 @@ print("ready in", ROOT)""")
 
 md("""## 2 · Choose a model provider
 Put your key in **Colab Secrets** (🔑 icon in the left sidebar) under one of these names and it is picked up automatically:
-`OPENAI_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`. Or paste it below.
+`OPENAI_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, plus `EXA_API_KEY` for date-cut actor research. Or paste it below.
 
 | provider | cost | notes |
 |---|---|---|
@@ -71,8 +71,12 @@ API_KEY  = ""            # leave empty to use a Colab secret / env var
 MODEL    = ""            # agents' model; empty = preset default (gpt-4o-mini, llama-3.3-70b, gemini-2.5-flash …)
 STRONG_MODEL = "gpt-4.1" # judgement roles (casting, arbiter, reports, history). "" = same as MODEL. OpenAI only by default.
 MAX_ROUNDS = 12          # simulation periods per branch (cost ≈ rounds × (agents+1) LLM calls)
+RESEARCH_DEPTH = "standard"  # actor dossiers: off | quick | standard | deep  (≈ 8-14 LLM calls per actor)
+EXA_API_KEY = ""         # optional but recommended: free key at https://exa.ai — true date-cut web search for dossiers
 
 import os
+os.environ["WHATIF_RESEARCH_DEPTH"] = RESEARCH_DEPTH
+if EXA_API_KEY: os.environ["EXA_API_KEY"] = EXA_API_KEY
 os.environ["WHATIF_PROVIDER"] = PROVIDER
 if API_KEY: os.environ["LLM_API_KEY"] = API_KEY
 if MODEL:   os.environ["LLM_MODEL_NAME"] = MODEL
@@ -80,7 +84,7 @@ if STRONG_MODEL and PROVIDER == "openai": os.environ["WHATIF_STRONG_MODEL"] = ST
 # pull keys from Colab secrets if present
 try:
     from google.colab import userdata
-    for name in ["OPENAI_API_KEY", "CEREBRAS_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "LLM_API_KEY"]:
+    for name in ["OPENAI_API_KEY", "CEREBRAS_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY", "LLM_API_KEY", "EXA_API_KEY", "SERPER_API_KEY"]:
         try:
             v = userdata.get(name)
             if v and not os.environ.get(name): os.environ[name] = v

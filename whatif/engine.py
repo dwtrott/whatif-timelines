@@ -17,6 +17,7 @@ from .config import Settings
 from .llm import LLM
 from .models import BRANCH_COLORS, Branch, Event, Persona, Scenario, new_id
 from .retrieval import Retriever, briefing_from_docs, Doc
+from .research import Researcher, dossier_digest
 from .store import Store
 
 log = logging.getLogger("whatif.engine")
@@ -190,6 +191,7 @@ class Engine:
                                            timeline_txt=P.format_timeline(base.events))
             self._log(sc, "Cast: " + "; ".join(p.name for p in sc.personas))
             base.status = "completed"
+            self.start_research(sc.id)
             base.progress = 1.0
             sc.status = "ready"
             self.store.save(sc)
@@ -245,7 +247,67 @@ class Engine:
             sc.notes = (sc.notes + "\n" + notes).strip()
         self.store.save(sc)
         self._log(sc, "Recast: " + "; ".join(p.name for p in sc.personas))
+        self.start_research(sc.id)
         return sc.personas
+
+    # ------------------------------------------------------------------ dossiers
+    def start_research(self, sid: str, persona_ids: list[str] | None = None, depth: str | None = None) -> int:
+        """Build evidence-backed dossiers in the background for personas that lack one (or the given ids)."""
+        sc = self.store.get(sid)
+        if not sc:
+            return 0
+        depth = depth or self.s.research_depth
+        if depth == "off":
+            return 0
+        todo = [p for p in sc.personas if (persona_ids and p.id in persona_ids) or
+                (not persona_ids and not p.dossier and p.dossier_status != "researching")]
+        if not todo:
+            return 0
+        for p in todo:
+            p.dossier_status = "researching"
+        self.store.save(sc)
+        key = f"research:{sid}:{datetime.utcnow().timestamp()}"
+        self.tasks[key] = asyncio.create_task(self._research_many(sid, [p.id for p in todo], depth), name=key)
+        return len(todo)
+
+    async def _research_many(self, sid: str, pids: list[str], depth: str):
+        sc = self.store.get(sid)
+        if not sc:
+            return
+        # profile as of the anchor (start of the story); forks later in the story inherit the branch timeline anyway
+        cutoff = min(sc.anchor_date, date.today().isoformat())
+        researcher = Researcher(self.s, self.llm, self.retriever,
+                                log_fn=lambda msg, level="info": self._log(sc, msg, level))
+        sem = asyncio.Semaphore(3)
+        self._log(sc, f"Researching dossiers for {len(pids)} actors (depth: {depth}, cutoff {cutoff})…")
+
+        async def one(pid: str):
+            p = next((x for x in sc.personas if x.id == pid), None)
+            if not p:
+                return
+            async with sem:
+                try:
+                    d = await researcher.build_dossier(
+                        {"name": p.name, "role": p.role, "goals": p.goals, "stance": p.stance, "style": p.style,
+                         "resources": p.resources, "background": p.background, "playbook": p.playbook,
+                         "relationships": p.relationships, "red_lines": p.red_lines},
+                        {"title": sc.title, "question": sc.question}, cutoff, [x.name for x in sc.personas], depth)
+                    p.dossier = d
+                    p.dossier_status = "done"
+                    if not p.user_edited:
+                        _apply_dossier(p, d)
+                    self._log(sc, f"Dossier ready: {p.name} — {len(d.get('sources', []))} sources, "
+                                  f"{len(d.get('evidence', []))} evidence items, confidence {d.get('confidence', '?')}")
+                except Exception as e:  # noqa: BLE001
+                    p.dossier_status = "failed"
+                    p.dossier = {"error": f"{type(e).__name__}: {str(e)[:300]}"}
+                    self._log(sc, f"Dossier failed for {p.name}: {e}", "warning")
+                self.store.save(sc)
+                self.bus.publish({"type": "dossier", "scenario_id": sc.id, "persona_id": pid, "status": p.dossier_status})
+
+        await asyncio.gather(*(one(pid) for pid in pids))
+        await researcher.aclose()
+        self._log(sc, "Dossier research complete.")
 
     def update_persona(self, sid: str, pid: str, fields: dict) -> Persona:
         sc = self.store.get(sid)
@@ -431,7 +493,7 @@ class Engine:
                                            background=p.background or "(not documented)", playbook=p.playbook or "(not documented)",
                                            relationships=p.relationships or "(not documented)", red_lines=p.red_lines or "(not documented)"),
                         P.fill(P.AGENT_USER, premise_block=P.premise_block(br.premise, br.fork_date),
-                                            notes_block=P.notes_block(sc.notes, br.notes),
+                                            notes_block=P.notes_block(sc.notes, br.notes) + _dossier_block(p),
                                             cutoff=br.knowledge_cutoff, briefing=br.briefing[:self.s.brief_chars],
                                             timeline=timeline_txt, memory=br.agent_memory.get(p.name, "(none)"),
                                             world_state=br.world_state or "(start of simulation)", date=d),
@@ -556,7 +618,7 @@ class Engine:
         d = br.events[-1].date if br.events else br.fork_date
         out = await self.llm.json(
             P.fill(P.INTERVIEW_SYS, name=p.name, role=p.role, date=d, goals=p.goals, stance=p.stance, style=p.style),
-            P.fill(P.INTERVIEW_USER, premise_block=P.premise_block(br.premise, br.fork_date), briefing_short=br.briefing[:5000],
+            P.fill(P.INTERVIEW_USER, premise_block=P.premise_block(br.premise, br.fork_date) + _dossier_block(p), briefing_short=br.briefing[:5000],
                                     timeline=P.format_timeline(self.lineage_events(sc, br)),
                                     memory=br.agent_memory.get(p.name, "(none)"), question=question),
             kind="interview", ctx={"name": p.name, "date": d, "premise": br.premise}, max_tokens=600)
@@ -619,3 +681,30 @@ def _int(v: Any, default: int) -> int:
 def _nearest_event(br: Branch, iso: str) -> Event | None:
     cands = [e for e in br.events if e.date <= iso]
     return max(cands, key=lambda e: e.date) if cands else (br.events[0] if br.events else None)
+
+
+def _dossier_block(p: Persona) -> str:
+    dg = dossier_digest(p.dossier) if p.dossier and "error" not in p.dossier else ""
+    return f"\nYOUR DOSSIER (evidence-based profile as of the cutoff — behave consistently with it):\n{dg}\n" if dg else ""
+
+
+def _apply_dossier(p: Persona, d: dict):
+    """Refresh the short persona fields from the evidence-based dossier (skipped for user-edited personas)."""
+    if d.get("summary"):
+        p.background = str(d["summary"])[:1200]
+    if d.get("playbook"):
+        p.playbook = "; ".join(map(str, d["playbook"][:6]))[:800]
+    if d.get("red_lines"):
+        p.red_lines = "; ".join(map(str, d["red_lines"][:5]))[:500]
+    rel = d.get("relationships")
+    if isinstance(rel, list) and rel:
+        p.relationships = "; ".join(f"{r.get('with', '')}: {r.get('nature', '')}" for r in rel[:8] if isinstance(r, dict))[:700]
+    ds = d.get("decision_style")
+    voice = d.get("voice") or {}
+    style_bits = []
+    if isinstance(ds, dict):
+        style_bits += [f"{k.replace('_', ' ')}: {v}" for k, v in ds.items() if isinstance(v, str)][:4]
+    if isinstance(voice, dict) and voice.get("style"):
+        style_bits.append(f"voice: {voice['style']}")
+    if style_bits:
+        p.style = "; ".join(style_bits)[:700]
