@@ -50,7 +50,8 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
     state = {"settings": settings}
     bus = EventBus()
     store = Store(settings.data_dir)
-    llm = LLM(settings, on_call=lambda info: bus.publish({"type": "llm_call", **info}))
+    note = lambda msg: bus.publish({"type": "log", "level": "warning", "msg": msg})  # noqa: E731
+    llm = LLM(settings, on_call=lambda info: bus.publish({"type": "llm_call", **info}), on_note=note)
     retriever = Retriever(settings)
     engine = Engine(settings, store, llm, retriever, bus, max_rounds=max_rounds)
     app.state.engine = engine
@@ -79,7 +80,7 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
         new.data_dir = engine.s.data_dir
         await engine.llm.aclose()
         engine.s = new
-        engine.llm = LLM(new, on_call=lambda info: bus.publish({"type": "llm_call", **info}))
+        engine.llm = LLM(new, on_call=lambda info: bus.publish({"type": "llm_call", **info}), on_note=note)
         engine.retriever = Retriever(new)
         state["settings"] = new
         ping = await engine.llm.ping()

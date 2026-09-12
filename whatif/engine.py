@@ -101,10 +101,22 @@ class Engine:
             # 1. which articles?
             if not sc.wiki_titles:
                 self._log(sc, "Asking the model which reference articles matter…")
-                hint = None if self.llm.is_mock else await self.retriever_safe(self.retriever.wiki_search, sc.title, 6)
-                out = await self.llm.json(P.ARTICLES_SYS, P.fill(P.ARTICLES_USER, 
-                    title=sc.title, question=sc.question, anchor=sc.anchor_date, horizon=sc.horizon_date),
-                    kind="articles", ctx={"hint_titles": hint or [sc.title]})
+                # run the model call and the Wikipedia title search concurrently; never let the search block us
+                async def _search():
+                    if self.llm.is_mock:
+                        return []
+                    try:
+                        return await asyncio.wait_for(self.retriever.wiki_search(sc.title, 6), timeout=12)
+                    except Exception as e:  # noqa: BLE001
+                        self._log(sc, f"Wikipedia title search failed/slow ({type(e).__name__}: {str(e)[:120]}); continuing with model-suggested titles.", "warning")
+                        return []
+                t0 = asyncio.get_event_loop().time()
+                out, hint = await asyncio.gather(
+                    self.llm.json(P.ARTICLES_SYS, P.fill(P.ARTICLES_USER,
+                        title=sc.title, question=sc.question, anchor=sc.anchor_date, horizon=sc.horizon_date),
+                        kind="articles", ctx={"hint_titles": [sc.title]}),
+                    _search())
+                self._log(sc, f"Title step done in {asyncio.get_event_loop().time() - t0:.1f}s")
                 sc.wiki_titles = [t for t in out.get("titles", []) if isinstance(t, str)][:self.s.max_wiki_articles + 2]
                 sc.wiki_titles = list(dict.fromkeys(sc.wiki_titles + (hint or [])[:2]))[: self.s.max_wiki_articles + 2]
                 queries = [q for q in out.get("queries", []) if isinstance(q, str)][:3]

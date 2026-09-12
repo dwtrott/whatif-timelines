@@ -55,8 +55,10 @@ class RateLimiter:
 
 
 class LLM:
-    def __init__(self, settings: Settings, on_call: Callable[[dict], None] | None = None):
+    def __init__(self, settings: Settings, on_call: Callable[[dict], None] | None = None,
+                 on_note: Callable[[str], None] | None = None):
         self.s = settings
+        self.on_note = on_note
         self.sem = asyncio.Semaphore(max(1, settings.concurrency))
         self.limiter = RateLimiter(settings.rpm)
         self.on_call = on_call
@@ -142,6 +144,8 @@ class LLM:
                 except (httpx.TimeoutException, httpx.TransportError) as e:
                     last_err = e
                     log.warning("LLM transport error (%s), retry %d", e, attempt + 1)
+                    if self.on_note:
+                        self.on_note(f"LLM transport error ({type(e).__name__}); retry {attempt + 1}/6 in {delay:.0f}s")
                     await asyncio.sleep(delay + random.random())
                     delay = min(delay * 2, 40)
                     continue
@@ -152,6 +156,8 @@ class LLM:
                 retry_after = r.headers.get("retry-after")
                 wait = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else delay
                 log.warning("LLM %s, waiting %.1fs (attempt %d)", r.status_code, wait, attempt + 1)
+                if self.on_note:
+                    self.on_note(f"LLM HTTP {r.status_code} ({r.text[:120].strip()}); waiting {wait:.0f}s, retry {attempt + 1}/6")
                 await asyncio.sleep(wait + random.random())
                 delay = min(delay * 2, 40)
                 continue
