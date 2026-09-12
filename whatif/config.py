@@ -110,6 +110,7 @@ class Settings:
     exa_api_key: str = ""        # optional: date-cut web search for dossiers (exa.ai)
     serper_api_key: str = ""     # optional: Google via serper.dev (date-range search)
     research_depth: str = "standard"   # off | quick | standard | deep
+    critic: bool = True          # plausibility reviewer pass on every period (one extra strong call per period)
     timeout: float = 120.0
     temperature: float = 0.7
     data_dir: str = "data"
@@ -135,7 +136,7 @@ class Settings:
             "model": self.model,
             "strong_model": self.strong_model,
             "has_exa": bool(self.exa_api_key), "has_serper": bool(self.serper_api_key),
-            "research_depth": self.research_depth,
+            "research_depth": self.research_depth, "critic": self.critic,
             "concurrency": self.concurrency,
             "rpm": self.rpm,
             "has_key": bool(self.api_key) or self.provider in ("ollama", "mock"),
@@ -207,6 +208,7 @@ def load_settings(**overrides) -> Settings:
     s.exa_api_key = _env("EXA_API_KEY")
     s.serper_api_key = _env("SERPER_API_KEY")
     s.research_depth = _env("WHATIF_RESEARCH_DEPTH") or "standard"
+    s.critic = (_env("WHATIF_CRITIC") or "1").lower() not in ("0", "false", "off", "no")
     for k, v in overrides.items():
         if hasattr(s, k) and v is not None:
             setattr(s, k, v)

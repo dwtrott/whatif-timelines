@@ -142,6 +142,8 @@ HOW TO PLAY IT
 Return JSON: {"thoughts": "private reasoning in first person, 3-5 sentences, including what you fear and what you
 expect others to do", "action": "the concrete thing you DO this period (one or two sentences, third person, starting
 with your name)", "statement": "what you say publicly, if anything, in first person (verbatim, or empty)",
+"messages": [{"to": "exact name of another actor on stage", "text": "a private message: an offer, threat, request or
+warning, in your voice (max 2 messages; empty list if none)"}],
 "predicted_next": "what you expect the others to do next (one sentence)"}"""
 
 
@@ -159,6 +161,9 @@ YOUR MEMORY / RUNNING NOTES:
 CURRENT WORLD STATE ({date}): {world_state}
 WORLD VARIABLES: {world_vars}
 {exogenous_block}
+PRIVATE MESSAGES YOU RECEIVED SINCE LAST PERIOD (only you see these):
+{inbox}
+
 YOUR OWN RECENT MOVES (do not repeat a move unless it worked and the situation still calls for it):
 {past_actions}
 
@@ -191,7 +196,14 @@ Adjudication principles:
   must be consistent with the period length and the cumulative record; never re-ask a question that was already
   resolved. Date each juncture at the day it would actually be decided, not the period end.
 - ELECTIONS AND SUCCESSION follow the WORLD VARIABLES (approval, economy, war footing, legislature control) and the
-  candidates on stage; name the candidates and the result.
+  candidates on stage; name the candidates and the result. Incumbent-party win probability tracks approval and the
+  economy (approval 0.55+ with growth → ~0.7; approval below 0.40 or recession → ~0.25).
+- NUMERIC WORLD VARIABLES move gradually: absent a shock, approval and economy_index change by at most ±0.10 per
+  period (scaled to period length); shocks move them sharply (attack → rally +0.10-0.20 then decay; recession →
+  economy_index down 0.4-0.8; scandal → approval down 0.05-0.15). Honeymoons fade; midterms punish the president's
+  party; wars that drag on erode approval.
+- PRIVATE CHANNEL: you also see the private messages actors sent each other this period. They shape what is
+  plausible (a deal offered privately can close; a threat can deter) but are not public events unless leaked.
 - NEWS VALUE. An action that adds no new information (another media series, another hearing on the same matter,
   another statement) produces NO event — mention it in world_state as background noise at most. Events are things
   that change someone's options.
@@ -215,8 +227,9 @@ Return JSON:
   "base_rate_note": "reference-class frequency in one sentence", "hazard_id": "stable_snake_case_id or empty",
   "if_yes": {"headline": "...", "summary": "..."}, "if_no": {"headline": "...", "summary": "..."},
   "importance": 1-5, "actors": ["..."]}],
- "world_vars": {"economy": "short phrase", "approval_head_of_government": 0-1, "legislature_control": "short phrase",
-  "war_footing": "short phrase", "media_climate": "short phrase", "public_mood": "short phrase"},
+ "world_vars": {"economy": "short phrase", "economy_index": -1..1 (growth/strength), "approval_head_of_government": 0-1,
+  "unrest": 0-1, "security_threat": 0-1, "legislature_control": "short phrase", "war_footing": "short phrase",
+  "media_climate": "short phrase", "public_mood": "short phrase"},
  "actor_updates": {"<persona name>": {"office": "current office/role", "capital": 0-1, "credibility": 0-1,
   "pressure": 0-1, "priorities": ["top 3 now"], "grievance": "new grievance if any, else empty"}},
  "new_actors": [{"name": "real person or precise office", "role": "...", "why_now": "..."}],
@@ -248,6 +261,9 @@ CAST CURRENTLY ON STAGE (with current state):
 
 ACTIONS THIS PERIOD ({date}):
 {actions}
+
+PRIVATE MESSAGES THIS PERIOD (not public):
+{messages}
 
 Adjudicate the period {prev} → {date} ({period_len}). Date events and junctures at the day they happen."""
 
@@ -528,3 +544,80 @@ SIMULATED EVENTS:
 
 REAL TIMELINE FOR THE WINDOW:
 {actual}"""
+
+
+
+# ====================================================================== period critic
+PERIOD_CRITIC_SYS = """You are the plausibility reviewer of a counterfactual simulation. Knowledge cutoff for the actors: {cutoff};
+period {prev} → {date}. You receive the world model's draft adjudication (events, junctures, actor updates) together with
+the context. Find and fix problems BEFORE they are committed:
+1. LEAKAGE/ANACHRONISM: anything that relies on knowledge after the cutoff (technology, names, later events), or on the
+   parent timeline's later course, or dates outside the period.
+2. CAPABILITY: an actor doing something their office, resources or constraints do not allow (a senator "ordering" the
+   FBI; a dead or retired actor acting; a minor actor moving markets).
+3. MAGNITUDE & REPETITION: consequences too large or too small for the action; events that are re-runs of previous
+   periods with no new information; junctures that re-ask a resolved question or ignore the hazard record.
+4. CALIBRATION: juncture probabilities inconsistent with the base-rate note, the period length, or the hazard record.
+5. OMISSIONS: an exogenous/structural event due this period that was not resolved; an obvious consequence of a
+   committed event that is missing (a resignation after a scandal that everyone acknowledges, market reaction to a
+   shock).
+Return JSON: {"events": [{"index": n, "verdict": "keep|drop|rewrite", "reason": "...", "headline": "new headline if
+rewrite", "summary": "new summary if rewrite"}], "junctures": [{"index": n, "verdict": "keep|drop|adjust",
+"p_yes": 0.0-1.0 (if adjust), "reason": "..."}], "add_events": [{"date": "YYYY-MM-DD", "headline": "...", "summary":
+"...", "actors": ["..."], "category": "...", "importance": 1-5, "reason": "why this was missing"}],
+"notes": "one or two sentences"}
+Be surgical: keep what is fine. Do not steer the story; enforce plausibility only."""
+
+PERIOD_CRITIC_USER = """{premise_block}
+BRIEFING (short): {briefing_short}
+
+TIMELINE SO FAR:
+{timeline}
+
+EXOGENOUS/STRUCTURAL DUE THIS PERIOD:
+{exogenous}
+
+JUNCTURE HISTORY:
+{juncture_history}
+
+CAST ON STAGE: {cast}
+
+ACTIONS THIS PERIOD:
+{actions}
+
+DRAFT ADJUDICATION (JSON):
+{draft}"""
+
+
+# ====================================================================== intervention planner
+PLAN_SYS = """You are the planner for a counterfactual engine — the tool a time traveller would use. Given a target outcome
+and a window, propose {k} candidate INTERVENTIONS: minimal, concrete, feasible changes at a specific date that a small
+group of people could plausibly cause (a decision reversed, a warning acted on, a meeting that happens, a document
+that reaches someone, a person who is or is not in a role), each with a short causal chain to the target. Prefer
+interventions with a small footprint and high leverage; avoid magic (no "everyone agrees"). Vary the mechanism across
+candidates (different actors, different levers, different dates).
+Return JSON: {"candidates": [{"name": "<= 8 words", "date": "YYYY-MM-DD within the window", "premise": "the counterfactual
+stated as a fact that becomes true on that date (1-3 sentences)", "who_acts": ["actors"], "mechanism": "causal chain to
+the target in 2-3 sentences", "footprint": 1-5 (1 = tiny change), "prior_plausibility": 0-1 (that the intervention itself
+could have been engineered), "risks": "what else it could break"}]}"""
+
+PLAN_USER = """Scenario: {title}
+TARGET OUTCOME to achieve by {deadline}: {target}
+Intervention window: {start} → {deadline}
+What actually happened in the window (parent lane):
+{actual}
+Cast: {cast}
+Analyst notes: {notes}"""
+
+PLAN_REPORT_SYS = """You write the decision memo for an intervention search. For each candidate intervention you get its
+Monte-Carlo results against the target (frequencies over runs, decisive junctures, one-liners per run). Rank the
+candidates by success rate, then by footprint and prior plausibility; explain WHY the winners work and why the losers
+fail, and what a decision-maker (or time traveller) should actually do, with timing. Be honest about run counts.
+Return JSON: {"ranking": [{"name": "...", "success_rate": 0-1, "footprint": 1-5, "prior_plausibility": 0-1,
+"why": "2-3 sentences"}], "recommendation": "150-250 words", "caveats": ["..."]}"""
+
+PLAN_REPORT_USER = """Scenario: {title}
+TARGET by {deadline}: {target}
+
+CANDIDATES AND RESULTS:
+{results}"""

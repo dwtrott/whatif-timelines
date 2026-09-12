@@ -47,10 +47,18 @@ in **Google Colab** on `localhost`, with **any OpenAI-compatible model** — an 
    damps a hazard after repeated hits. Fork ×N for a **Monte Carlo** group: runs differ by seed and an aggregate codes
    the outcome question across them. **Score vs. actual history** gives a Brier score on junctures with known real
    outcomes and an event hit-rate, plus the run's systematic biases. Branches can be forked from branches.
-6. **Analyse.** Each finished lane gets a report: narrative, mechanism, probability estimate, key divergences,
+   Between the arbiter's draft and the commit, a **plausibility critic** (strong model) checks every period for leakage
+   and anachronism, capability violations, repetition, miscalibrated junctures and missing consequences, and applies
+   surgical fixes (drop / rewrite / adjust p / add) that are logged on the lane. Agents also have a **private channel**:
+   up to two messages per period to other actors (offers, threats, warnings), delivered next period and visible to the
+   arbiter — coalitions and deals can form off-stage.
+6. **Plan interventions (time-traveller mode).** On any lane: give a target outcome and a deadline; the planner proposes
+   K minimal, dated interventions with causal chains, runs each as a Monte-Carlo group to the deadline, scores them
+   against the target and writes a decision memo ranking them by success rate, footprint and prior plausibility.
+7. **Analyse.** Each finished lane gets a report: narrative, mechanism, probability estimate, key divergences,
    signposts, the assumptions it rests on, whether it converges back to the parent. **Interview** any agent inside any
    lane; **compare** two lanes.
-7. **Steer.** You usually know the actors better than the model does. Every persona is **editable** (track record,
+8. **Steer.** You usually know the actors better than the model does. Every persona is **editable** (track record,
    playbook, relationships, red lines), you can **add** actors or **recast** with guidance, and **analyst notes** on the
    scenario or on a single fork are injected into every agent and arbiter prompt as expert priors. Set a **strong
    model** (e.g. `gpt-4.1`) for the judgement roles — casting, arbiter, reports, history extraction — while agents run
@@ -100,6 +108,8 @@ Knobs: max rounds (per fork or globally), agents per scenario, `WHATIF_CONCURREN
 | `GET /api/scenarios/{id}` | full state: personas, docs, branches, events, reports, log |
 | `POST /api/scenarios/{id}/fork` | `{parent_branch_id, fork_event_id?, fork_date?, premise, name?, max_rounds?, step_days?, notes?, runs?, seed?}` |
 | `GET …/aggregate?group=` | Monte-Carlo aggregate for a run group |
+| `POST …/plan` `{parent_branch_id, target, deadline, start?, k?, runs?, rounds?, notes?}` | intervention search (results in scenario `plans`) |
+| `POST …/branches/{bid}/calibrate` | Brier score of a run's junctures vs. actual history |
 | `POST …/branches/{bid}/stop`, `DELETE …/branches/{bid}` | |
 | `PATCH …/personas/{pid}` (or `/personas/new`), `DELETE …/personas/{pid}`, `POST …/recast` `{notes}` | edit the cast |
 | `POST …/research` `{persona_ids?, depth?}` | build dossiers (all missing, or the given actors) |

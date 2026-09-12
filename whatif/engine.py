@@ -453,7 +453,8 @@ class Engine:
     # ------------------------------------------------------------------ branches
     def fork(self, sid: str, parent_id: str, fork_event_id: str | None, premise: str, name: str = "",
              fork_date: str | None = None, step_days: int | None = None, max_rounds: int | None = None,
-             notes: str = "", runs: int = 1, seed: int | None = None) -> Branch:
+             notes: str = "", runs: int = 1, seed: int | None = None, horizon: str | None = None,
+             plan_id: str = "", color: str | None = None) -> Branch:
         sc = self.store.get(sid)
         if not sc:
             raise KeyError("scenario not found")
@@ -462,13 +463,14 @@ class Engine:
             raise KeyError("parent branch not found")
         ev = next((e for e in parent.events if e.id == fork_event_id), None) if fork_event_id else None
         fdate = fork_date or (ev.date if ev else parent.fork_date)
-        if fdate >= sc.horizon_date:
-            raise ValueError("fork date must be before the scenario horizon")
+        horizon = min(horizon, sc.horizon_date) if horizon else sc.horizon_date
+        if fdate >= horizon:
+            raise ValueError("fork date must be before the horizon")
         if fdate < (parent.fork_date or sc.anchor_date):
             raise ValueError(f"fork date must be on or after the parent lane's start ({parent.fork_date or sc.anchor_date})")
         premise = (premise or "").strip()
         base_name = name.strip() or (premise[:60] + ("…" if len(premise) > 60 else "") if premise else "Forecast")
-        days = (date.fromisoformat(sc.horizon_date) - date.fromisoformat(fdate)).days
+        days = (date.fromisoformat(horizon) - date.fromisoformat(fdate)).days
         step = step_days or sc.step_days
         # default round budget grows with the horizon so long spans are not cartoons (cap still applies)
         cap = max_rounds or suggested_rounds(days, step, self.max_rounds)
@@ -486,7 +488,9 @@ class Engine:
                         knowledge_cutoff=fdate, notes=(notes or "").strip(), color=BRANCH_COLORS[idx], status="pending",
                         total_rounds=rounds, step_days=step, created_at=datetime.utcnow().isoformat(timespec="seconds"),
                         depth=parent.depth + 1, seed=(seed if seed is not None else random.randrange(1, 10**9)) + i,
-                        run_group=group)
+                        run_group=group, horizon_end=horizon if horizon != sc.horizon_date else "", plan_id=plan_id)
+            if color:
+                br.color = color
             br.events.append(Event(id=new_id("ev"), branch_id=br.id, date=fdate,
                                    headline=("What if: " + premise[:110]) if premise else "Forecast begins",
                                    summary=premise or "Agents forecast forward with no counterfactual change.",
@@ -531,8 +535,10 @@ class Engine:
         future = [e for e in future if e.date > br.fork_date and e.kind != "premise"]
         cast = self._cast_names(sc, br)
         ev_txt = "\n".join(f"- id={e.id} {e.date} [{e.kind}] {e.headline} — {e.summary[:220]}" for e in future[:60]) or "(none recorded)"
-        out = await self.llm.json(P.fill(P.CAUSAL_MAP_SYS, fork_date=br.fork_date, horizon=sc.horizon_date),
-                                  P.fill(P.CAUSAL_MAP_USER, title=sc.title, fork_date=br.fork_date, horizon=sc.horizon_date,
+        hz = self._horizon(sc, br)
+        future = [e for e in future if e.date <= hz]
+        out = await self.llm.json(P.fill(P.CAUSAL_MAP_SYS, fork_date=br.fork_date, horizon=hz),
+                                  P.fill(P.CAUSAL_MAP_USER, title=sc.title, fork_date=br.fork_date, horizon=hz,
                                          premise=br.premise or "(no counterfactual change — plain forecast)",
                                          cast=", ".join(cast), events=ev_txt),
                                   kind="causal_map", ctx={"seed": br.id, "dates": [e.date for e in future[:8]],
@@ -544,7 +550,7 @@ class Engine:
             if not isinstance(c, dict):
                 continue
             e = by_id.get(str(c.get("event_id", "")))
-            d = e.date if e else _safe_date(c.get("date"), br.fork_date, sc.horizon_date)
+            d = e.date if e else _safe_date(c.get("date"), br.fork_date, hz)
             if not d:
                 continue
             verdict = str(c.get("verdict", "contingent")).lower()
@@ -559,14 +565,17 @@ class Engine:
         structural = []
         for x in out.get("structural", []) or []:
             if isinstance(x, dict) and x.get("event"):
-                d = _safe_date(x.get("date"), br.fork_date, sc.horizon_date)
-                structural.append({"date": d or sc.horizon_date, "event": str(x["event"])[:200], "kind": str(x.get("kind", ""))[:20],
+                d = _safe_date(x.get("date"), br.fork_date, hz)
+                structural.append({"date": d or hz, "event": str(x["event"])[:200], "kind": str(x.get("kind", ""))[:20],
                                    "actor": str(x.get("actor", ""))[:80], "note": str(x.get("note", ""))[:200], "resolved": False})
         br.structural = sorted(structural, key=lambda x: x["date"])
         br.world_notes = str(out.get("notes", ""))[:600]
         n = {k: sum(1 for c in br.causal_map if c["verdict"] == k) for k in ("independent", "dependent", "contingent")}
         self._log(sc, f"[{br.name}] Causal map: {n['independent']} independent, {n['contingent']} contingent, "
                       f"{n['dependent']} dependent real events; {len(br.structural)} structural events.", branch_id=br.id)
+
+    def _horizon(self, sc: Scenario, br: Branch) -> str:
+        return br.horizon_end or sc.horizon_date
 
     def _cast_names(self, sc: Scenario, br: Branch) -> list[str]:
         return [p.name for p in sc.personas + br.extra_personas if p.name not in br.retired]
@@ -600,7 +609,7 @@ class Engine:
             self.store.save(sc)
             self.bus.publish({"type": "branch_status", "scenario_id": sc.id, "branch_id": br.id, "status": br.status})
 
-            dates = adaptive_schedule(br.fork_date, sc.horizon_date, br.total_rounds, sc.step_days)
+            dates = adaptive_schedule(br.fork_date, self._horizon(sc, br), br.total_rounds, sc.step_days)
             br.schedule = dates
             prev = br.fork_date
             past_actions: dict[str, list[str]] = {}
@@ -640,12 +649,15 @@ class Engine:
                                             world_state=br.world_state or "(start of simulation)", date=d,
                                             world_vars=_fmt_vars(br.world_vars),
                                             exogenous_block=agent_exo, elapsed=elapsed,
+                                            inbox="\n".join(f"- from {m['from']}: {m['text']}" for m in br.inbox.get(p.name, [])[-6:]) or "(none)",
                                             past_actions="\n".join(f"- {a}" for a in past_actions.get(p.name, [])[-4:]) or "(none yet)"),
                         kind="agent_step", ctx={"name": p.name, "date": d, "premise": br.premise, "topic": sc.title,
                                                 "seed": br.id}, max_tokens=900)
+                    msgs = [{"to": str(m.get("to", ""))[:80], "text": str(m.get("text", ""))[:300]}
+                            for m in (out.get("messages") or [])[:2] if isinstance(m, dict) and m.get("to") and m.get("text")]
                     return {"persona_id": p.id, "name": p.name, "role": p.role,
                             "thoughts": str(out.get("thoughts", ""))[:600], "action": str(out.get("action", ""))[:400],
-                            "statement": str(out.get("statement", ""))[:400],
+                            "statement": str(out.get("statement", ""))[:400], "messages": msgs,
                             "predicted_next": str(out.get("predicted_next", ""))[:300]}
 
                 results = await asyncio.gather(*(step(p) for p in personas), return_exceptions=True)
@@ -660,6 +672,16 @@ class Engine:
                         past_actions.setdefault(p.name, []).append(f"{d}: {res['action']}")
                 self.bus.publish({"type": "agent_actions", "scenario_id": sc.id, "branch_id": br.id, "date": d,
                                   "actions": [{"name": a["name"], "action": a["action"]} for a in actions]})
+                # private channel: deliver next period
+                br.inbox = {}
+                msg_lines = []
+                names_on_stage = {p.name for p in personas}
+                for a in actions:
+                    for m in a.get("messages", []):
+                        if m["to"] in names_on_stage and m["to"] != a["name"]:
+                            br.inbox.setdefault(m["to"], []).append({"from": a["name"], "text": m["text"], "date": d})
+                            msg_lines.append(f"- {a['name']} → {m['to']}: {m['text']}")
+                messages_txt = "\n".join(msg_lines) or "(none)"
 
                 # --- arbiter / world model
                 parent_block = ""
@@ -677,11 +699,17 @@ class Engine:
                                           elapsed=elapsed, exogenous_block=exogenous_block, parent_block=parent_block,
                                           world_vars=_fmt_vars(br.world_vars), juncture_history=_juncture_history(br),
                                           cast="\n".join(f"- {p.name} ({p.role}) — {_state_line(br, p)}" for p in personas),
-                                          actions=actions_txt, date=d, prev=prev, period_len=_elapsed(prev, d)),
+                                          actions=actions_txt, messages=messages_txt, date=d, prev=prev, period_len=_elapsed(prev, d)),
                     kind="arbiter", ctx={"date": d, "premise": br.premise, "topic": sc.title, "seed": br.id + d,
                                          "has_parent": bool(parent)}, max_tokens=2600, strong=True)
+                # --- plausibility critic (surgical corrections before anything is committed)
+                if self.s.critic:
+                    try:
+                        out = await self._critique(sc, br, out, prev, d, timeline_txt, exogenous_block, personas, actions_txt)
+                    except Exception as e:  # noqa: BLE001
+                        self._log(sc, f"[{br.name}] critic skipped: {e}", "warning", branch_id=br.id)
                 new_events = []
-                for e in (out.get("events") or [])[:4]:
+                for e in (out.get("events") or [])[:5]:
                     if not isinstance(e, dict):
                         continue
                     ed = _safe_date(e.get("date"), prev, d) or d
@@ -739,8 +767,20 @@ class Engine:
                 br.world_state = str(out.get("world_state", br.world_state))
                 wv = out.get("world_vars")
                 if isinstance(wv, dict):
+                    days_len = max(1, (date.fromisoformat(d) - date.fromisoformat(prev)).days)
+                    shock = any(e.importance >= 4 for e in new_events)
                     for k, v in wv.items():
-                        if isinstance(k, str) and isinstance(v, (str, int, float)):
+                        if not isinstance(k, str):
+                            continue
+                        if k in ("economy_index", "approval_head_of_government", "unrest", "security_threat") and isinstance(v, (int, float)):
+                            lo, hi = (-1.0, 1.0) if k == "economy_index" else (0.0, 1.0)
+                            v = max(lo, min(hi, float(v)))
+                            old_v = br.world_vars.get(k)
+                            if isinstance(old_v, (int, float)) and not shock:
+                                max_delta = 0.10 * max(0.5, min(3.0, days_len / 90))   # gradual absent a shock
+                                v = max(old_v - max_delta, min(old_v + max_delta, v))
+                            br.world_vars[k] = round(v, 2)
+                        elif isinstance(v, (str, int, float)):
                             br.world_vars[k] = v
                 au = out.get("actor_updates")
                 if isinstance(au, dict):
@@ -815,7 +855,7 @@ class Engine:
             self.store.save(sc)
             self._log(sc, f"[{br.name}] Completed. p≈{br.report.get('probability_estimate', '?')}", branch_id=br.id)
             self.bus.publish({"type": "branch_status", "scenario_id": sc.id, "branch_id": br.id, "status": br.status})
-            if br.run_group:
+            if br.run_group and not br.plan_id:
                 self._maybe_aggregate(sc, br.run_group)
         except asyncio.CancelledError:
             br.status = "stopped"
@@ -830,15 +870,178 @@ class Engine:
             log.error(traceback.format_exc())
             self.bus.publish({"type": "branch_status", "scenario_id": sc.id, "branch_id": br.id, "status": br.status})
 
+    async def _critique(self, sc: Scenario, br: Branch, draft: dict, prev: str, d: str, timeline_txt: str,
+                        exogenous_block: str, personas: list[Persona], actions_txt: str) -> dict:
+        import json as _json
+        slim = {"events": draft.get("events", []), "junctures": [{k: v for k, v in j.items() if k in ("date", "question", "p_yes", "base_rate_note", "hazard_id")}
+                                                                    for j in (draft.get("junctures") or []) if isinstance(j, dict)],
+                "new_actors": draft.get("new_actors", []), "exits": draft.get("exits", [])}
+        crit = await self.llm.json(P.fill(P.PERIOD_CRITIC_SYS, cutoff=br.knowledge_cutoff, prev=prev, date=d),
+                                   P.fill(P.PERIOD_CRITIC_USER, premise_block=P.premise_block(br.premise, br.fork_date),
+                                          briefing_short=br.briefing[:2500], timeline=timeline_txt[-6000:], exogenous=exogenous_block or "(none)",
+                                          juncture_history=_juncture_history(br), cast=", ".join(p.name for p in personas),
+                                          actions=actions_txt, draft=_json.dumps(slim, ensure_ascii=False)[:9000]),
+                                   kind="period_critic", ctx={"seed": br.id + d}, strong=True, max_tokens=1600, temperature=0.1)
+        events = list(draft.get("events") or [])
+        juncs = list(draft.get("junctures") or [])
+        changes = []
+        for c in crit.get("events", []) or []:
+            if not isinstance(c, dict):
+                continue
+            i = c.get("index")
+            if not isinstance(i, int) or not 0 <= i < len(events) or not isinstance(events[i], dict):
+                continue
+            v = c.get("verdict")
+            if v == "drop":
+                events[i] = None
+                changes.append(f"dropped event {i}: {c.get('reason', '')}")
+            elif v == "rewrite":
+                if c.get("headline"):
+                    events[i]["headline"] = c["headline"]
+                if c.get("summary"):
+                    events[i]["summary"] = c["summary"]
+                changes.append(f"rewrote event {i}: {c.get('reason', '')}")
+        for c in crit.get("junctures", []) or []:
+            if not isinstance(c, dict):
+                continue
+            i = c.get("index")
+            if not isinstance(i, int) or not 0 <= i < len(juncs) or not isinstance(juncs[i], dict):
+                continue
+            if c.get("verdict") == "drop":
+                juncs[i] = None
+                changes.append(f"dropped juncture {i}: {c.get('reason', '')}")
+            elif c.get("verdict") == "adjust" and c.get("p_yes") is not None:
+                juncs[i]["p_yes"] = _float(c["p_yes"], juncs[i].get("p_yes", 0.5))
+                juncs[i]["p_change_reason"] = c.get("reason", "critic")
+                changes.append(f"adjusted juncture {i} p→{juncs[i]['p_yes']:.2f}: {c.get('reason', '')}")
+        for a in (crit.get("add_events") or [])[:2]:
+            if isinstance(a, dict) and a.get("headline"):
+                events.append({**a, "confidence": 0.7, "divergence": 0.3, "exogenous": False})
+                changes.append(f"added event: {a.get('headline')} ({a.get('reason', '')})")
+        draft["events"] = [e for e in events if e]
+        draft["junctures"] = [j for j in juncs if j]
+        if changes:
+            br.critic_notes.append({"date": d, "changes": changes[:6], "notes": str(crit.get("notes", ""))[:300]})
+            br.critic_notes = br.critic_notes[-60:]
+            self._log(sc, f"[{br.name}] critic {d}: " + "; ".join(changes)[:300], branch_id=br.id)
+        return draft
+
+    # ------------------------------------------------------------------ intervention planner
+    def plan(self, sid: str, parent_id: str, target: str, deadline: str, start: str | None = None, k: int = 3,
+             runs: int = 3, rounds: int | None = None, notes: str = "") -> dict:
+        sc = self.store.get(sid)
+        if not sc or parent_id not in sc.branches:
+            raise KeyError("scenario/branch not found")
+        parent = sc.branches[parent_id]
+        start = start or parent.fork_date or sc.anchor_date
+        deadline = min(deadline, sc.horizon_date)
+        if deadline <= start:
+            raise ValueError("deadline must be after the window start")
+        plan = {"id": new_id("plan"), "target": target.strip(), "deadline": deadline, "start": start, "parent_branch_id": parent_id,
+                "k": max(1, min(5, k)), "runs": max(1, min(5, runs)), "rounds": rounds, "notes": notes, "status": "proposing",
+                "candidates": [], "report": {}, "created_at": datetime.utcnow().isoformat(timespec="seconds")}
+        sc.plans.append(plan)
+        self.store.save(sc)
+        self.tasks[plan["id"]] = asyncio.create_task(self._run_plan(sid, plan["id"]), name=f"plan:{plan['id']}")
+        return plan
+
+    def _get_plan(self, sc: Scenario, pid: str) -> dict | None:
+        return next((p for p in sc.plans if p["id"] == pid), None)
+
+    async def _run_plan(self, sid: str, pid: str):
+        sc = self.store.get(sid)
+        plan = self._get_plan(sc, pid) if sc else None
+        if not sc or not plan:
+            return
+        try:
+            parent = sc.branches[plan["parent_branch_id"]]
+            actual = [e for e in self.lineage_events(sc, parent) if plan["start"] <= e.date <= plan["deadline"]]
+            self._log(sc, f"[plan] Proposing {plan['k']} interventions for: {plan['target']}")
+            out = await self.llm.json(P.fill(P.PLAN_SYS, k=plan["k"]), P.fill(
+                P.PLAN_USER, title=sc.title, target=plan["target"], deadline=plan["deadline"], start=plan["start"],
+                actual=P.format_timeline(actual, 60), cast=", ".join(p.name for p in sc.personas), notes=(sc.notes + "\n" + plan["notes"]).strip() or "(none)"),
+                kind="plan", ctx={"seed": pid, "k": plan["k"], "dates": [plan["start"], plan["deadline"]]}, strong=True, max_tokens=2600, temperature=0.5)
+            cands = []
+            for c in (out.get("candidates") or [])[: plan["k"]]:
+                if not isinstance(c, dict) or not c.get("premise"):
+                    continue
+                cdate = _safe_date(c.get("date"), plan["start"], plan["deadline"]) or plan["start"]
+                if cdate >= plan["deadline"]:
+                    cdate = plan["start"]
+                cands.append({"name": str(c.get("name", ""))[:80], "date": cdate, "premise": str(c["premise"])[:600],
+                              "who_acts": _strlist(c.get("who_acts")), "mechanism": str(c.get("mechanism", ""))[:500],
+                              "footprint": _int(c.get("footprint"), 3), "prior_plausibility": _float(c.get("prior_plausibility"), 0.5),
+                              "risks": str(c.get("risks", ""))[:300], "group": "", "success_rate": None, "aggregate": {}})
+            if not cands:
+                raise RuntimeError("planner proposed no candidates")
+            plan["candidates"] = cands
+            plan["status"] = "running"
+            self.store.save(sc)
+            self._log(sc, "[plan] Candidates: " + " | ".join(c["name"] for c in cands))
+            # launch a Monte-Carlo group per candidate (short horizon = deadline)
+            ev_anchor = None
+            for c in cands:
+                anchor_ev = _nearest_event(parent, c["date"])
+                first = self.fork(sid, parent.id, anchor_ev.id if anchor_ev else None, c["premise"], name=f"plan: {c['name']}",
+                                  fork_date=c["date"], runs=plan["runs"], max_rounds=plan["rounds"], horizon=plan["deadline"],
+                                  plan_id=pid, notes=plan["notes"])
+                c["group"] = first.run_group or first.id
+            self.store.save(sc)
+            # wait for all groups to finish
+            while True:
+                await asyncio.sleep(5)
+                sc = self.store.get(sid)
+                plan = self._get_plan(sc, pid)
+                sibs = [b for b in sc.branches.values() if b.plan_id == pid]
+                if sibs and all(b.status in ("completed", "failed", "stopped") for b in sibs):
+                    break
+            # aggregate each candidate against the TARGET question
+            tq = f"Was the target achieved by {plan['deadline']}: {plan['target']}?"
+            for c in plan["candidates"]:
+                group_branches = [b for b in sc.branches.values() if (b.run_group == c["group"] or b.id == c["group"]) and b.status == "completed"]
+                if not group_branches:
+                    c["success_rate"] = 0.0
+                    continue
+                if not group_branches[0].run_group:
+                    group_branches[0].run_group = f"single:{group_branches[0].id}"
+                    c["group"] = group_branches[0].run_group
+                agg = await self.aggregate(sid, c["group"], question=tq)
+                c["aggregate"] = {k: v for k, v in agg.items() if k in ("frequencies", "summary", "decisive_junctures", "per_run", "n_runs")}
+                freq = list((agg.get("frequencies") or {}).values())
+                if freq and isinstance(freq[0], dict):
+                    f0 = freq[0]
+                    n = (f0.get("yes", 0) + f0.get("no", 0) + f0.get("partial", 0)) or 1
+                    c["success_rate"] = round((f0.get("yes", 0) + 0.5 * f0.get("partial", 0)) / n, 2)
+            results = "\n\n".join(
+                f"=== {c['name']} (date {c['date']}, footprint {c['footprint']}, prior plausibility {c['prior_plausibility']}) ===\n"
+                f"Premise: {c['premise']}\nMechanism: {c['mechanism']}\nSuccess rate over runs: {c['success_rate']}\n"
+                f"Aggregate summary: {(c.get('aggregate') or {}).get('summary', '')}\nDecisive junctures: {'; '.join((c.get('aggregate') or {}).get('decisive_junctures', []) or [])}"
+                for c in plan["candidates"])
+            rep = await self.llm.json(P.PLAN_REPORT_SYS, P.fill(P.PLAN_REPORT_USER, title=sc.title, deadline=plan["deadline"],
+                                                                  target=plan["target"], results=results[:40000]),
+                                      kind="plan_report", ctx={"seed": pid}, strong=True, max_tokens=2200, temperature=0.3)
+            plan["report"] = rep
+            plan["status"] = "completed"
+            self.store.save(sc)
+            self._log(sc, f"[plan] Complete. Best: " + (rep.get("ranking") or [{}])[0].get("name", "?"))
+            self.bus.publish({"type": "plan_status", "scenario_id": sc.id, "plan_id": pid, "status": "completed"})
+        except Exception as e:  # noqa: BLE001
+            plan["status"] = "failed"
+            plan["error"] = f"{type(e).__name__}: {e}"
+            self.store.save(sc)
+            self._log(sc, f"[plan] Failed: {plan['error']}", "error")
+            log.error(traceback.format_exc())
+
     def _maybe_aggregate(self, sc: Scenario, group: str):
         sibs = [b for b in sc.branches.values() if b.run_group == group]
         if sibs and all(b.status in ("completed", "failed", "stopped") for b in sibs):
             self.tasks[f"agg:{group}"] = asyncio.create_task(self.aggregate(sc.id, group), name=f"agg:{group}")
 
-    async def aggregate(self, sid: str, group: str) -> dict:
+    async def aggregate(self, sid: str, group: str, question: str | None = None) -> dict:
         sc = self.store.get(sid)
         if not sc:
             raise KeyError("scenario not found")
+        question = question or sc.question
         sibs = [b for b in sc.branches.values() if b.run_group == group and b.status == "completed"]
         if not sibs:
             raise KeyError("no completed runs in this group")
@@ -847,7 +1050,7 @@ class Engine:
             junc = "; ".join(f"{j['date']} {j['question']} → {j['outcome'].upper()} (p={j['p_yes']})" for j in b.junctures[:8])
             runs_txt.append(f"=== {b.name} (seed {b.seed}) ===\nSummary: {b.report.get('summary', '')}\nJunctures: {junc or 'none'}\n"
                             f"Timeline:\n{P.format_timeline(b.events, 30)}")
-        out = await self.llm.json(P.AGGREGATE_SYS, P.fill(P.AGGREGATE_USER, title=sc.title, question=sc.question,
+        out = await self.llm.json(P.AGGREGATE_SYS, P.fill(P.AGGREGATE_USER, title=sc.title, question=question,
                                                             premise=sibs[0].premise or "(plain forecast)", runs="\n\n".join(runs_txt)[:60000]),
                                   kind="aggregate", ctx={"seed": group, "n": len(sibs)}, strong=True, max_tokens=2600, temperature=0.2)
         out["group"] = group
@@ -877,7 +1080,7 @@ class Engine:
             world_lines.append("CAST CHANGES: entered " + (", ".join(p.name for p in br.extra_personas) or "none") + "; exited " + (", ".join(br.retired) or "none"))
         out = await self.llm.json(P.REPORT_SYS, P.fill(P.REPORT_USER,
             title=sc.title, question=sc.question, name=br.name, premise_block=P.premise_block(br.premise, br.fork_date),
-            fork_date=br.fork_date, horizon=sc.horizon_date, parent_block=parent_block, world_block="\n".join(world_lines),
+            fork_date=br.fork_date, horizon=self._horizon(sc, br), parent_block=parent_block, world_block="\n".join(world_lines),
             timeline=P.format_timeline([e for e in br.events]), world_state=br.world_state),
             kind="report", ctx={"premise": br.premise, "topic": sc.title, "seed": br.id}, max_tokens=2400, temperature=0.4, strong=True)
         out["probability_estimate"] = _float(out.get("probability_estimate"), 0.5)

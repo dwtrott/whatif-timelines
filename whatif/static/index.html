@@ -23,6 +23,10 @@
       <h3>Branches <span id="branchCount" class="badge"></span></h3>
       <div id="branchList" class="list"></div>
     </section>
+    <section class="panel" id="plansPanel" hidden>
+      <h3>Intervention plans <span id="planCount" class="badge"></span></h3>
+      <div id="planList" class="list"></div>
+    </section>
     <section class="panel">
       <h3>Agents <span id="agentCount" class="badge"></span><span class="spacer"></span>
         <button class="ghost small" id="addAgentBtn" title="Add an actor by hand">+ add</button>
@@ -116,6 +120,7 @@
     <h3 style="margin-top:10px">Actor research (dossiers)</h3>
     <p class="small muted">Per-actor evidence gathering: Wikipedia/Wikiquote as of the cutoff, Wayback snapshots, and web search. A date-cut search key makes dossiers much better.</p>
     <div class="grid2">
+      <label>Plausibility critic (one extra strong call per period)<select id="pCritic"><option value="1">on</option><option value="0">off</option></select></label>
       <label>Depth<select id="pDepth"><option value="off">off (cast only)</option><option value="quick">quick</option><option value="standard">standard</option><option value="deep">deep</option></select></label>
       <label>Exa API key (<a href="https://exa.ai" target="_blank" rel="noopener">exa.ai</a>, free tier; true date-cut search)<input id="pExa" type="password" placeholder="blank = keep current"></label>
       <label>Serper API key (<a href="https://serper.dev" target="_blank" rel="noopener">serper.dev</a>, Google date-range)<input id="pSerper" type="password" placeholder="blank = keep current"></label>

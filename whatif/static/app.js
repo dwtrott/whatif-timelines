@@ -79,7 +79,8 @@ function isActive() {
   if (!state.sc) return false;
   if (['retrieving', 'new'].includes(state.sc.status)) return true;
   return Object.values(state.sc.branches).some(b => ['running', 'retrieving', 'pending'].includes(b.status))
-    || (state.sc.personas || []).some(p => p.dossier_status === 'researching');
+    || (state.sc.personas || []).some(p => p.dossier_status === 'researching')
+    || (state.sc.plans || []).some(pl => ['proposing', 'running'].includes(pl.status));
 }
 
 function schedulePoll() {
@@ -98,7 +99,7 @@ function handleBusMessage(m) {
       const b = state.sc?.branches?.[m.branch_id];
       logLine({ts: m.ts, level: 'agent', msg: `[${b ? b.name : m.branch_id}] ${m.date} · ` + m.actions.map(a => `${a.name}: ${a.action}`).join('  ‖  ')});
     } else if (m.type === 'llm_call') logLine({ts: m.ts, level: 'llm', msg: `llm ${m.kind || ''} ${m.model} ${m.ms}ms ${m.tokens ? m.tokens + ' tok' : ''}`});
-    else if (m.type === 'scenario_ready' || m.type === 'branch_status' || m.type === 'branch_progress' || m.type === 'dossier') {
+    else if (m.type === 'scenario_ready' || m.type === 'branch_status' || m.type === 'branch_progress' || m.type === 'dossier' || m.type === 'plan_status') {
       if (state.sc && m.scenario_id === state.sc.id) refreshScenario();
       if (m.type === 'scenario_ready') loadScenarios();
     }
@@ -188,6 +189,10 @@ function renderSidebar() {
   const laneSel = state.sel?.type === 'branch' ? sc.branches[state.sel.id] : null;
   const castList = laneSel ? [...sc.personas.filter(p => !(laneSel.retired || []).includes(p.name)), ...(laneSel.extra_personas || [])] : sc.personas;
   $('#agentCount').textContent = castList.length + (laneSel ? ' on lane' : '');
+  const plans = sc.plans || [];
+  $('#plansPanel').hidden = !plans.length;
+  $('#planCount').textContent = plans.length;
+  $('#planList').innerHTML = plans.map(pl => `<div class="item ${state.sel?.type === 'plan' && state.sel.id === pl.id ? 'active' : ''}" onclick="showPlan('${pl.id}')"><div class="t"><span class="name">${esc(pl.target)}</span><span class="spacer"></span><span class="status ${pl.status === 'completed' ? 'completed' : pl.status === 'failed' ? 'failed' : 'running'}">${pl.status}</span></div><div class="sub" style="margin-left:0">by ${pl.deadline} · ${pl.k} candidates × ${pl.runs} runs</div></div>`).join('');
   const dstat = p => p.dossier_status === 'researching' ? '<span class="status running">researching…</span>' : p.dossier_status === 'done' ? `<span class="status completed" title="evidence-backed dossier">${(p.dossier?.sources || []).length} src</span>` : p.dossier_status === 'failed' ? '<span class="status failed">no dossier</span>' : '';
   const stateTag = p => { const st = laneSel?.agent_state?.[p.name]; return st ? `<span class="muted" title="capital / credibility / pressure"> · cap ${Number(st.capital).toFixed(2)} · pr ${Number(st.pressure).toFixed(2)}</span>` : ''; };
   const entered = new Set((laneSel?.extra_personas || []).map(p => p.id));
@@ -403,6 +408,7 @@ function renderEventDetail(box) {
         <div class="who">${esc(a.name)} <span>· ${esc(a.role)}</span></div>
         <div>${esc(a.action)}</div>
         ${a.statement ? `<div class="say">${esc(a.statement)}</div>` : ''}
+        ${(a.messages || []).length ? a.messages.map(m => `<div class="small" style="color:var(--warn)">✉ to ${esc(m.to)}: ${esc(m.text)}</div>`).join('') : ''}
         ${a.thoughts ? `<details><summary>private reasoning</summary>${esc(a.thoughts)}${a.predicted_next ? `<br><em>expects:</em> ${esc(a.predicted_next)}` : ''}</details>` : ''}
       </div>`).join('')}</div>` : ''}
     ${e.sources?.length ? `<div class="dsec"><h4>Sources</h4>${e.sources.map(s => `<div class="small">${esc(s)}</div>`).join('')}</div>` : ''}
@@ -504,6 +510,8 @@ function renderBranchDetail(box) {
         ${r.convergence_note ? `<p class="small muted">${esc(r.convergence_note)}</p>` : ''}
       </div>` : ''}
     ${b.report?.aggregate ? aggregateHTML(b.report.aggregate) : (b.run_group ? `<div class="dsec small muted">Part of a ${Object.values(sc.branches).filter(x => x.run_group === b.run_group).length}-run Monte Carlo group — the aggregate appears here when all runs finish. <button class="ghost small" onclick="runAggregate('${b.run_group}')">aggregate now</button></div>` : '')}
+    ${b.critic_notes?.length ? `<div class="dsec"><details><summary class="muted small">Plausibility critic — ${b.critic_notes.length} period(s) corrected</summary>${b.critic_notes.map(n => `<div class="small" style="margin:4px 0"><span class="mono muted">${n.date}</span> ${esc((n.changes || []).join(' · '))}${n.notes ? ` <span class="muted">— ${esc(n.notes)}</span>` : ''}</div>`).join('')}</details></div>` : ''}
+    ${!['running', 'retrieving', 'pending'].includes(b.status) ? planFormHTML(b) : ''}
     ${b.world_vars && Object.keys(b.world_vars).length ? `<div class="dsec"><h4>World variables (end of run)</h4><div class="kv">${Object.entries(b.world_vars).map(([k, v]) => `<b>${esc(k.replace(/_/g, ' '))}</b><span>${esc(String(v))}</span>`).join('')}</div></div>` : ''}
     ${b.report?.calibration ? calibrationHTML(b.report.calibration) : (b.parent_branch_id && b.status === 'completed' && sc.baseline_branch_id ? `<div class="dsec"><h4>Calibration</h4><div class="small muted">Score this run's junctures and events against what really happened in the same window (meaningful for plain forecasts; premise-dependent items are marked n/a).</div><button class="small" style="margin-top:6px" onclick="runCalibrate('${b.id}')">score vs. actual history</button></div>` : '')}
     ${b.hazards && Object.keys(b.hazards).length ? `<div class="dsec"><h4>Recurring hazards</h4>${Object.entries(b.hazards).map(([k, h]) => `<div class="small"><span class="tag">${esc(k)}</span> ${esc(h.question || '')} — rolled ${h.rolls}×, ${h.yes} yes, last p ${h.last_p}</div>`).join('')}</div>` : ''}
@@ -534,6 +542,52 @@ function aggregateHTML(a) {
     ${(a.decisive_junctures || []).length ? `<h4 style="margin-top:8px">Decisive junctures</h4><ul class="md">${a.decisive_junctures.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
     ${(a.per_run || []).length ? `<details><summary class="muted small">per run</summary>${a.per_run.map(r => `<div class="small" style="margin:3px 0"><b>${esc(r.run)}</b> — ${esc(r.one_line)} <span class="muted">${esc(Object.entries(r.answers || {}).map(([k, v]) => v).join(' / '))}</span></div>`).join('')}</details>` : ''}
   </div>`;
+}
+
+function planFormHTML(b) {
+  const sc = state.sc;
+  return `<div class="dsec forkForm"><h4>Plan an intervention (time-traveller mode)</h4>
+    <div class="small muted">Give a target outcome and a deadline. The planner proposes minimal interventions on this lane, runs each as a Monte-Carlo group to the deadline, scores them against the target and writes a decision memo. Cost ≈ candidates × runs × (rounds × (agents+2)) calls.</div>
+    <label>Target outcome<textarea id="planTarget" rows="2" placeholder="e.g. No mass-casualty terrorist attack on US soil before 2002-01-01"></textarea></label>
+    <div class="grid2">
+      <label>Deadline<input id="planDeadline" type="date" min="${b.fork_date || sc.anchor_date}" max="${sc.horizon_date}" value="${sc.horizon_date}"></label>
+      <label>Window start<input id="planStart" type="date" min="${b.fork_date || sc.anchor_date}" max="${sc.horizon_date}" value="${b.fork_date || sc.anchor_date}"></label>
+      <label>Candidates<select id="planK"><option>2</option><option selected>3</option><option>4</option><option>5</option></select></label>
+      <label>Runs per candidate<select id="planRuns"><option>1</option><option>2</option><option selected>3</option><option>5</option></select></label>
+      <label>Rounds per run<input id="planRounds" type="number" min="3" max="40" value="10"></label>
+    </div>
+    <label>Notes to the planner (optional)<textarea id="planNotes" rows="2"></textarea></label>
+    <div class="row end"><button class="primary" onclick="doPlan('${b.id}')">⑂ Search interventions</button></div></div>`;
+}
+
+async function doPlan(bid) {
+  const body = {parent_branch_id: bid, target: $('#planTarget').value.trim(), deadline: $('#planDeadline').value, start: $('#planStart').value,
+    k: +$('#planK').value, runs: +$('#planRuns').value, rounds: +$('#planRounds').value, notes: $('#planNotes').value.trim()};
+  if (!body.target || !body.deadline) return alert('Target and deadline are required.');
+  const est = body.k * body.runs * (body.rounds * ((state.sc.personas.length || 6) + 2) + 4);
+  if (!confirm(`Launch ${body.k} candidates × ${body.runs} runs? ≈${est} LLM calls.`)) return;
+  try { const pl = await api(`/api/scenarios/${state.sc.id}/plan`, 'POST', body); await refreshScenario(); showPlan(pl.id); }
+  catch (e) { alert(e.message); }
+}
+
+function showPlan(pid) {
+  const pl = (state.sc.plans || []).find(x => x.id === pid); if (!pl) return;
+  state.sel = {type: 'plan', id: pid};
+  const r = pl.report || {};
+  const cands = pl.candidates || [];
+  $('#detailBody').innerHTML = `<div class="dhead"><div class="kicker">intervention plan · <span class="status ${pl.status === 'completed' ? 'completed' : 'running'}">${pl.status}</span></div><h2>${esc(pl.target)}</h2><div class="muted">by ${pl.deadline} · window from ${pl.start} · ${pl.k} candidates × ${pl.runs} runs</div>${pl.error ? `<div class="errbox">${esc(pl.error)}</div>` : ''}</div>
+    ${r.recommendation ? `<div class="dsec"><h4>Recommendation</h4><div class="md">${md(r.recommendation)}</div>${(r.caveats || []).length ? `<ul class="md small">${r.caveats.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</div>` : ''}
+    ${(r.ranking || []).length ? `<div class="dsec"><h4>Ranking</h4>${r.ranking.map((x, i) => `<div class="agentAct"><div class="who">${i + 1}. ${esc(x.name)} <span>· success ${Math.round((x.success_rate || 0) * 100)}% · footprint ${x.footprint} · plausibility ${Math.round((x.prior_plausibility || 0) * 100)}%</span></div><div class="small">${esc(x.why || '')}</div></div>`).join('')}</div>` : ''}
+    <div class="dsec"><h4>Candidates</h4>${cands.map(c => `<div class="agentAct"><div class="who">${esc(c.name)} <span>· ${c.date} · footprint ${c.footprint} · prior ${Math.round(c.prior_plausibility * 100)}%${c.success_rate != null ? ' · <b>success ' + Math.round(c.success_rate * 100) + '%</b>' : ''}</span></div>
+        <div>${esc(c.premise)}</div><div class="small muted">${esc(c.mechanism)}</div>${c.risks ? `<div class="small muted">risks: ${esc(c.risks)}</div>` : ''}
+        ${c.aggregate?.summary ? `<details><summary class="small muted">runs</summary><div class="md small">${md(c.aggregate.summary)}</div>${(c.aggregate.per_run || []).map(rr => `<div class="small">• ${esc(rr.run)}: ${esc(rr.one_line)}</div>`).join('')}</details>` : ''}
+        ${c.group ? `<div class="small"><a href="#" onclick="event.preventDefault();selectPlanLane('${c.group}')">open lanes</a></div>` : ''}</div>`).join('') || '<div class="muted small">proposing…</div>'}</div>`;
+  renderSidebar();
+}
+
+function selectPlanLane(group) {
+  const b = Object.values(state.sc.branches).find(x => x.run_group === group || x.id === group);
+  if (b) selectBranch(b.id);
 }
 
 function calibrationHTML(c) {
@@ -754,7 +808,7 @@ function openProvider() {
   sel.innerHTML = c.presets.map(p => `<option value="${p.key}">${esc(p.label)}${p.free_tier ? ' · free' : ''}</option>`).join('') + '<option value="custom">Custom OpenAI-compatible</option>';
   sel.value = c.presets.some(p => p.key === s.provider) ? s.provider : 'custom';
   $('#pBase').value = s.base_url; $('#pModel').value = s.model; $('#pStrong').value = s.strong_model || '';
-  $('#pDepth').value = s.research_depth || 'standard'; $('#pExa').value = ''; $('#pSerper').value = '';
+  $('#pDepth').value = s.research_depth || 'standard'; $('#pCritic').value = s.critic === false ? '0' : '1'; $('#pExa').value = ''; $('#pSerper').value = '';
   $('#pExa').placeholder = s.has_exa ? 'key set — blank keeps it' : 'no key (DuckDuckGo + Wayback fallback)';
   $('#pSerper').placeholder = s.has_serper ? 'key set — blank keeps it' : 'no key'; $('#pConc').value = s.concurrency; $('#pRpm').value = s.rpm; $('#pRounds').value = c.max_rounds; $('#pKey').value = '';
   const notes = () => {
@@ -769,7 +823,7 @@ function openProvider() {
 
 async function saveProvider() {
   const body = {provider: $('#pPreset').value === 'custom' ? '' : $('#pPreset').value, api_key: $('#pKey').value, base_url: $('#pBase').value, model: $('#pModel').value,
-    strong_model: $('#pStrong').value, research_depth: $('#pDepth').value, exa_api_key: $('#pExa').value, serper_api_key: $('#pSerper').value, concurrency: +$('#pConc').value || undefined, rpm: $('#pRpm').value === '' ? undefined : +$('#pRpm').value, max_rounds: +$('#pRounds').value || undefined};
+    strong_model: $('#pStrong').value, research_depth: $('#pDepth').value, critic: $('#pCritic').value === '1', exa_api_key: $('#pExa').value, serper_api_key: $('#pSerper').value, concurrency: +$('#pConc').value || undefined, rpm: $('#pRpm').value === '' ? undefined : +$('#pRpm').value, max_rounds: +$('#pRounds').value || undefined};
   if (body.provider === '' && !body.base_url) return alert('Base URL required for a custom provider.');
   $('#pResult').textContent = 'testing…';
   try {

@@ -79,6 +79,8 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
         new.serper_api_key = (body.get("serper_api_key") or "").strip() or engine.s.serper_api_key
         if body.get("research_depth") in ("off", "quick", "standard", "deep"):
             new.research_depth = body["research_depth"]
+        if "critic" in body:
+            new.critic = bool(body["critic"])
         if provider and not body.get("api_key") and engine.s.provider == provider:
             new.api_key = engine.s.api_key  # keep the existing key when only the model changes
         if body.get("max_rounds"):
@@ -253,6 +255,18 @@ def create_app(settings: Settings | None = None, max_rounds: int = 12) -> FastAP
             return await engine.interview(sid, bid, body.get("persona_id", ""), body.get("question", ""))
         except KeyError as e:
             raise HTTPException(404, str(e))
+
+    @app.post("/api/scenarios/{sid}/plan")
+    async def plan(sid: str, req: Request):
+        body = await req.json()
+        try:
+            return engine.plan(sid, body.get("parent_branch_id", ""), body.get("target", ""), body.get("deadline", ""),
+                               start=body.get("start") or None, k=int(body.get("k") or 3), runs=int(body.get("runs") or 3),
+                               rounds=int(body["rounds"]) if body.get("rounds") else None, notes=body.get("notes", ""))
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     @app.get("/api/scenarios/{sid}/aggregate")
     async def aggregate(sid: str, group: str):

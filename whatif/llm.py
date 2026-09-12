@@ -357,6 +357,7 @@ def mock_response(kind: str, messages: list[dict], ctx: dict) -> str:
             "action": f"{name} {pick(_VERBS)[0]} {topic}.",
             "statement": f"\"We will not be rushed on {topic}; the facts as of {date} speak for themselves.\"",
             "predicted_next": f"{pick(_ACTORS)[0].capitalize()} responds by {rng.choice(['convening a summit', 'leaking a memo', 'issuing sanctions', 'calling a vote'])}.",
+            "messages": [{"to": ctx.get("other", ""), "text": "Let us talk before this gets worse."}] if rng.random() < 0.3 else [],
         })
     if kind == "arbiter":
         k = rng.choice([1, 2, 2, 3])
@@ -423,6 +424,16 @@ def mock_response(kind: str, messages: list[dict], ctx: dict) -> str:
         return _json.dumps({"outcome_questions": ["Did the crisis escalate?"], "per_run": [{"run": f"run {i+1}", "answers": {"Did the crisis escalate?": "yes" if i % 2 == 0 else "no"}, "one_line": "mock"} for i in range(n)],
                             "frequencies": {"Did the crisis escalate?": {"yes": (n + 1) // 2, "no": n // 2, "partial": 0}},
                             "summary": "Mock aggregate summary.", "decisive_junctures": ["the election roll"]})
+    if kind == "period_critic":
+        return _json.dumps({"events": [], "junctures": [], "add_events": [], "notes": "mock: looks plausible"})
+    if kind == "plan":
+        dates = ctx.get("dates", ["2000-01-01", "2001-01-01"])
+        return _json.dumps({"candidates": [{"name": f"Intervention {i+1}", "date": dates[0], "premise": f"Mock premise {i+1} becomes true.",
+                                            "who_acts": ["the government"], "mechanism": "mock chain", "footprint": i + 1,
+                                            "prior_plausibility": 0.6 - 0.1 * i, "risks": "mock"} for i in range(ctx.get("k", 3))]})
+    if kind == "plan_report":
+        return _json.dumps({"ranking": [{"name": "Intervention 1", "success_rate": 0.67, "footprint": 1, "prior_plausibility": 0.6, "why": "mock"}],
+                            "recommendation": "Mock recommendation.", "caveats": ["mock"]})
     if kind == "calibrate":
         return _json.dumps({"junctures": [{"question": "mock", "p_yes": 0.4, "actual": "no", "note": "mock"}],
                             "events": [{"headline": "mock", "actual": "partly", "note": "mock"}],

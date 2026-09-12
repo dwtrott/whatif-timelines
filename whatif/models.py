@@ -88,6 +88,10 @@ class Branch:
     agent_state: dict = field(default_factory=dict)        # name -> {office, capital, credibility, pressure, priorities, grievances}
     world_vars: dict = field(default_factory=dict)         # economy, approval, legislature control, war footing, media climate
     hazards: dict = field(default_factory=dict)            # hazard_id -> {rolls, yes, last_p, question}
+    inbox: dict = field(default_factory=dict)              # name -> [private messages waiting]
+    horizon_end: str = ""                                  # per-branch horizon override (planner uses shorter ones)
+    plan_id: str = ""                                      # intervention plan this branch belongs to
+    critic_notes: list[dict] = field(default_factory=list) # per-period critic notes
 
     def events_until(self, iso: str) -> list[Event]:
         return [e for e in self.events if e.date <= iso]
@@ -116,6 +120,7 @@ class Scenario:
     baseline_branch_id: str = ""
     provider: dict = field(default_factory=dict)
     log: list[dict] = field(default_factory=list)
+    plans: list[dict] = field(default_factory=list)          # intervention plans (planner)
 
     # ---------------------------------------------------------------- helpers
     def to_dict(self) -> dict:
